@@ -60,21 +60,16 @@ def chop_string(text: str, max_length: int, ellipsis: str = "\N{HORIZONTAL ELLIP
 
 
 # Pulled from discord's sources and modified slightly with capturing groups
-URL_REGEX: re.Pattern = re.compile(r"^(?:https?:\/\/[^\s<]+[^<.,:;\"')\]\s])")
-URL_REGEX_NO_EMBED: re.Pattern = re.compile(r"<(?:[^:\ >]+:\/[^\ >]+)>")
+URL_REGEX: re.Pattern = re.compile(r"(?P<url>https?:\/\/[^\s<]+[^<.,:;\"')\]\s])")
+URL_REGEX_NO_EMBED: re.Pattern = re.compile(r"<(?P<url>[^:\ >]+:\/[^\ >]+)>")
 URL_LINK_REGEX: re.Pattern = re.compile(
     r"""
-    ^\[
-    (?:\[[^\]]*\]|[^\[\]]|\](?=[^\[]*\]))*
+    \[
+    (?P<text>(?:\[[^\]]*\]|[^\[\]]|\](?=[^\[]*\]))*)
     \]\(\s*
-    <?((?:\([^)]*\)|[^\s\\]|\\.)*?)>?
-    (?:\s+['"](?:[\s\S]*?)['"])?
+    <?(?P<url>(?:\([^)]*\)|[^\s\\]|\\.)*?)>?
+    (?P<tooltip>\s+['"](?:[\s\S]*?)['"])?
     \s*\)
     """,
     flags=re.VERBOSE,
-)
-
-# All of the above regexes combined into a single regex for joint URL matching
-JOINT_URL_REGEX: re.Pattern = re.compile(
-    f"(?:{URL_LINK_REGEX.pattern})|(?:{URL_REGEX.pattern})|(?:{URL_REGEX_NO_EMBED.pattern})",
 )

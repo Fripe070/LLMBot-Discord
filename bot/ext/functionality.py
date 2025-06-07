@@ -4,15 +4,20 @@ import datetime
 import random
 import re
 import time
+from collections.abc import Sequence
 from typing import TypedDict , cast
 
+import aiohttp
 import discord
 import ollama as ollama_api
 from discord import app_commands
 from discord.ext import commands
+from pydantic import BaseModel
+from yarl import URL
 
+import bot.apis as apis
 from bot.bot import LLMBot
-from bot.util.formatting import chop_string
+from bot.util.formatting import chop_string, URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
 
 type DiscordSnowflake = int
 type ChannelID = DiscordSnowflake
@@ -45,9 +50,11 @@ class AIBotFunctionality(commands.Cog):
         self.ollama = ollama_api.AsyncClient(
             host=bot.config.setdefault("ollama_base_url", "http://localhost:11434"),
         )
+        self.searx_instance_url: str = bot.config.setdefault("searx_instance_url", "")
+        self.tenor_api_key: str = bot.config.setdefault("tenor_api_key", "").strip()
 
-        self.llm_model_text = bot.config.setdefault("llm_model_text", "llama3:8b-text")
-        self.llm_model_chat = bot.config.setdefault("llm_model_chat", "llama3:8b")
+        self.llm_model_text = bot.config.setdefault("llm_model_text", "llama3.1:8b-instruct-q4_K_M")
+        self.llm_model_chat = bot.config.setdefault("llm_model_chat", "llama3.1:8b-text-q4_K_M")
         bot.config.setdefault("use_ai_user", True)
         bot.config.setdefault("activity_limits", {
             "window": 20,
@@ -145,6 +152,7 @@ class AIBotFunctionality(commands.Cog):
 
     async def checkup_runner(self) -> None:
         await self.ensure_downloaded(self.llm_model_text)
+        await self.ensure_downloaded(self.llm_model_chat)
 
         await self.bot.wait_until_ready()
 
@@ -313,6 +321,7 @@ class AIBotFunctionality(commands.Cog):
                 content,
                 channel=channel,
                 author_indexes=author_indexes,
+                history_context=collected_messages,
             )
 
         print(f"Final LLM response: {response_content}")
@@ -332,9 +341,7 @@ class AIBotFunctionality(commands.Cog):
         *,
         author_indexes: dict[DiscordSnowflake, int],
     ) -> str:
-        # TODO: Cleanup and richer message contents
-        #  Handle multiline
-        #  Surface more message data (e.g. attachments, embeds, links, images)
+        # TODO: Surface more message data (e.g. attachments, embeds, images)
         content = message.content.strip()
         assert message.guild is not None, "Message must be in a guild"
 
@@ -355,6 +362,7 @@ class AIBotFunctionality(commands.Cog):
         *,
         channel: discord.TextChannel,
         author_indexes: dict[DiscordSnowflake, int],
+        history_context: Sequence[discord.Message],
     ) -> str | None:
         # TODO: *Technically* we should have a check for if the content is in a codeblock
 
@@ -370,7 +378,7 @@ class AIBotFunctionality(commands.Cog):
         inverse_author_indexes = {v: k for k, v in author_indexes.items()}
         for match_full, match_index in (
             *re.findall(r"(@([0-9]+)\b)", content),
-            *re.findall(r"(\bUser ([0-9]+)\b)", content, flags=re.IGNORECASE),
+            *re.findall(r"(\bUser ?([0-9]+)\b)", content, flags=re.IGNORECASE),
         ):
             match_index_int = int(match_index)
             if 0 <= match_index_int >= len(inverse_author_indexes):
@@ -380,7 +388,91 @@ class AIBotFunctionality(commands.Cog):
                 return None
             content = content.replace(match_full, f"<@{mapped_snowflake}>")
 
+        links: list[re.Match[str]] = [
+            *re.finditer(URL_REGEX, content),
+            *re.finditer(URL_REGEX_NO_EMBED, content),
+            *re.finditer(URL_LINK_REGEX, content),
+        ]
+        urls: set[str] = {match["url"] for match in links}
+        processed_urls: list[str | None | BaseException] = await asyncio.gather(
+            *(self.process_url(url, history_context=history_context) for url in urls),
+            return_exceptions=True,
+        )
+        for original_url, processed_url in zip(urls, processed_urls):
+            if processed_url is None:
+                continue
+            if not isinstance(processed_url, str):
+                print(f"Error processing URL {original_url}: {processed_url}")
+                continue
+            print(f"{original_url} -> {processed_url}")
+            content = content.replace(original_url, processed_url)
+
+        # TODO: Images
+
+
         return content
+
+    async def process_url(
+        self,
+        url: str,
+        *,
+        history_context: Sequence[discord.Message],
+    ) -> str | None:
+        try:
+            parsed_url: URL = URL(url)
+        except ValueError:
+            return None
+        if parsed_url.scheme not in {"http", "https"}:
+            return None
+        if not parsed_url.host:
+            return None
+
+        if self.tenor_api_key and (
+            parsed_url.host.endswith(("tenor.com", "giphy.com")) 
+            or parsed_url.suffix in {".gif", ".webp"}
+        ):
+            tenor_query = await apis.searching.generate_search_query(
+                "\n".join(msg.content for msg in history_context),
+                prompt=apis.searching.GIF_PROMPT,
+                model=self.bot.config["llm_model_chat"],
+                ollama_api=self.ollama,
+            )
+            print(f"Searching Tenor for: {tenor_query}")
+            search_results = await apis.searching.search_tenor(
+                tenor_query,
+                api_key=self.tenor_api_key,
+                limit=3,
+            )
+            if not search_results:
+                raise ValueError(f"No Tenor results found for query: {tenor_query}")
+            return str(random.choice(search_results).url)
+
+        # Any engines that use normal search queries are handled below
+        if not self.searx_instance_url:
+            print(f"Skipping URL {url} as no Searx instance URL is configured.")
+            return url
+        query = await apis.searching.generate_search_query(
+            "\n".join(msg.content for msg in history_context),
+            model=self.bot.config["llm_model_chat"],
+            ollama_api=self.ollama,
+        )
+        print(f"Generated query for URL {url}: {query}")
+        
+        if parsed_url.host.endswith(("youtube.com", "youtu.be")):
+            search_results = await apis.searching.search_searx(
+                query,
+                api_url=self.searx_instance_url,
+                engines=["youtube"]
+            )
+            if not search_results:
+                raise ValueError(f"No YouTube results found for query: {query}")
+            return str(search_results[0].url)
+
+        # We just search for the query in general search engines
+        search_results = await apis.searching.search_searx(query, api_url=self.searx_instance_url)
+        if not search_results:
+            raise ValueError(f"No search results found for query: {query}")
+        return str(search_results[0].url)
 
     cmd_group = app_commands.Group(
         name="channel",
