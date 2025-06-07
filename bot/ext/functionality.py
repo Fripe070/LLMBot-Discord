@@ -217,7 +217,7 @@ class AIBotFunctionality(commands.Cog):
         msg_process_start = time.perf_counter()
 
         assert self.bot.user is not None, "Bot user must be set"
-        if self.bot.config["activity_limits"]["limit"] > 0:
+        if reply_to is None and self.bot.config["activity_limits"]["limit"] > 0:
             bot_sighting_count: int = 0
             for i in range(0, -min(self.bot.config["activity_limits"]["window"], len(collected_messages)), -1):
                 if collected_messages[i].author.id == self.bot.user.id:
@@ -316,6 +316,8 @@ class AIBotFunctionality(commands.Cog):
                     continue
             if reply_to is not None:
                 replied_msg_index = len(handled_msg_ids) - 1
+
+            print("Unprocessed LLM response:", content)
 
             response_content = await self.process_outgoing(
                 content,
