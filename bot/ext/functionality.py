@@ -209,13 +209,14 @@ class AIBotFunctionality(commands.Cog):
         msg_process_start = time.perf_counter()
 
         assert self.bot.user is not None, "Bot user must be set"
-        bot_sighting_count: int = 0
-        for i in range(0, -min(self.bot.config["activity_limits"]["window"], len(collected_messages)), -1):
-            if collected_messages[i].author.id == self.bot.user.id:
-                bot_sighting_count += 1
-                if bot_sighting_count >= self.bot.config["activity_limits"]["limit"]:
-                    print(f"Skipping checkup for {channel.name} as the bot is too active.")
-                    return
+        if self.bot.config["activity_limits"]["limit"] > 0:
+            bot_sighting_count: int = 0
+            for i in range(0, -min(self.bot.config["activity_limits"]["window"], len(collected_messages)), -1):
+                if collected_messages[i].author.id == self.bot.user.id:
+                    bot_sighting_count += 1
+                    if bot_sighting_count >= self.bot.config["activity_limits"]["limit"]:
+                        print(f"Skipping checkup for {channel.name} as the bot is too active.")
+                        return
 
         author_indexes: dict[DiscordSnowflake, int] = {}
         handled_msg_ids: list[MessageID] = []
@@ -282,12 +283,11 @@ class AIBotFunctionality(commands.Cog):
                 model=self.llm_model_text,
                 prompt=prompt,
                 options=ollama_api.Options(
-                    # TODO: Worth considering a more complex stopping mechanism using a streaming wrapper
-                    #  to allow for multiline responses
-                    stop=["\n"],
+                    stop=["\n[msgid:"],
+                    num_predict=500,
                 ),
             )
-            # pprint(result.model_dump())
+
             meta, _, content = result.response.partition(": ")
             content = content.strip()
             if not content:
@@ -366,11 +366,6 @@ class AIBotFunctionality(commands.Cog):
         emoji_map = {f":{emoji.name}:": emoji for emoji in channel.guild.emojis}
         for emoji_str, emoji in emoji_map.items():
             content = content.replace(emoji_str, str(emoji))
-
-        # Replace mentions with their Discord representation
-        # mention_map = {f"@{user_id}": f"<@{user_id}>" for user_id in author_indexes.values()}
-        # for mention_str, mention in mention_map.items():
-        #     content = re.sub(rf"\b{re.escape(mention_str)}\b", mention, content)
 
         inverse_author_indexes = {v: k for k, v in author_indexes.items()}
         for match_full, match_index in (
