@@ -329,13 +329,16 @@ class AIBotFunctionality(commands.Cog):
 
         print(f"Final LLM response: {response_content}")
 
+        allowed_mentions = discord.AllowedMentions(replied_user=True, users=True, everyone=False, roles=False)
         if replied_msg_index is None:
             await channel.send(
                 content=chop_string(response_content, 2000),
+                allowed_mentions=allowed_mentions,
             )
         else:
             await collected_messages[replied_msg_index].reply(
                 content=chop_string(response_content, 2000),
+                allowed_mentions=allowed_mentions,
             )
 
     async def process_incoming(
