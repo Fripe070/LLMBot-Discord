@@ -5,14 +5,12 @@ import random
 import re
 import time
 from collections.abc import Sequence
-from typing import TypedDict , cast
+from typing import TypedDict, cast
 
-import aiohttp
 import discord
 import ollama as ollama_api
 from discord import app_commands
 from discord.ext import commands
-from pydantic import BaseModel
 from yarl import URL
 
 import bot.apis as apis
@@ -37,13 +35,15 @@ class AIBotFunctionality(commands.Cog):
     def __init__(self, bot: LLMBot) -> None:
         self.bot = bot
         self.bg_task: asyncio.Task | None = None
-        # self.tasks: list[asyncio.Task[None]] = []
         self._cached_channel_settings: dict[ChannelID, ChannelSettings] | None = None
 
         self.schedule: dict[ChannelID, datetime.datetime] = {}
 
+        self.max_message_history: int = bot.config.setdefault("message_history_max" , 100)
+        self.max_message_history_reply: int = bot.config.setdefault("message_history_reply", 10)
+
         self.message_map: dict[ChannelID, collections.deque[discord.Message]] = collections.defaultdict(
-            lambda: collections.deque(maxlen=self.MAX_MESSAGE_HISTORY)
+            lambda: collections.deque(maxlen=max(self.max_message_history, self.max_message_history_reply))
         )
 
         self.bot.config.setdefault("allowed_channels", {})
@@ -60,8 +60,6 @@ class AIBotFunctionality(commands.Cog):
             "window": 20,
             "limit": 3,
         })
-
-    MAX_MESSAGE_HISTORY = 50
 
     DEFAULT_INTERVAL = datetime.timedelta(minutes=10)
     DEFAULT_JITTER = datetime.timedelta(minutes=5)
@@ -196,23 +194,26 @@ class AIBotFunctionality(commands.Cog):
         channel: discord.TextChannel,
         reply_to: discord.Message | None = None,
         *,
-        history_override: collections.deque[discord.Message] | None = None,
+        history_override: Sequence[discord.Message] | None = None,
     ) -> None:
         assert channel.id in self.channel_settings, f"Channel {channel.id} is not an allowed channel"
         print(f"Performing checkup for {channel.name}...")
 
-        collected_messages: collections.deque[discord.Message]
+        relevant_history_length = self.max_message_history_reply if reply_to else self.max_message_history
+        collected_messages: Sequence[discord.Message]
         if history_override is not None:
-            collected_messages = history_override
+            collected_messages = history_override[-relevant_history_length:]
         else:
-            collected_messages = self.message_map[channel.id]
+            collected_messages = tuple(self.message_map[channel.id])[-relevant_history_length:]
             if not collected_messages:
-                print(f"No messages collected in {channel.name}. Trying to fetch {self.MAX_MESSAGE_HISTORY} messages.")
-                async for msg in channel.history(
-                    limit=self.MAX_MESSAGE_HISTORY,
-                    before=reply_to or datetime.datetime.now(),
-                ):
-                    collected_messages.appendleft(msg)
+                print(f"No messages collected in {channel.name}. Trying to fetch {self.max_message_history} messages.")
+                collected_messages = [
+                    msg
+                    async for msg in channel.history(
+                        limit=relevant_history_length,
+                        before=reply_to or datetime.datetime.now(),
+                    )
+                ][::-1]  # Reverse to have oldest first
 
         msg_process_start = time.perf_counter()
 
