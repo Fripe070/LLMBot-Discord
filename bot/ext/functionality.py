@@ -53,8 +53,8 @@ class AIBotFunctionality(commands.Cog):
         self.searx_instance_url: str = bot.config.setdefault("searx_instance_url", "")
         self.tenor_api_key: str = bot.config.setdefault("tenor_api_key", "").strip()
 
-        self.llm_model_text = bot.config.setdefault("llm_model_text", "llama3.1:8b-instruct-q4_K_M")
-        self.llm_model_chat = bot.config.setdefault("llm_model_chat", "llama3.1:8b-text-q4_K_M")
+        self.llm_model_text = bot.config.setdefault("llm_model_text", "llama3.1:8b-text-q4_K_M")
+        self.llm_model_chat = bot.config.setdefault("llm_model_chat", "llama3.1:8b-instruct-q4_K_M")
         bot.config.setdefault("use_ai_user", True)
         bot.config.setdefault("activity_limits", {
             "window": 20,
@@ -143,10 +143,10 @@ class AIBotFunctionality(commands.Cog):
             return a == b
 
         if any(models_match(model, model_name) for model in (await self.ollama.list()).models):
-            print(f'Skipping download of "{self.llm_model_text}" as it is already downloaded.')
+            print(f'Skipping download of "{model_name}" as it is already downloaded.')
         else:
             async for step in await self.ollama.pull(model_name, stream=True):
-                print(f'Downloading model "{model_name}": {step.status}')
+                print(f'Downloading model "{model_name}" {step.status} {(step.completed or 1) / (step.total or 1) * 100:.2f}%')
 
     async def checkup_runner(self) -> None:
         await self.ensure_downloaded(self.llm_model_text)
@@ -285,7 +285,12 @@ class AIBotFunctionality(commands.Cog):
         # We simply retry until we get a valid response from the LLM.
         response_content: str | None = None
         replied_msg_index: int | None = None
+        i = 0
         while response_content is None:
+            i += 1
+            if i > 10:
+                print(f"WARNING: On attempt {i}. Might never terminate if the LLM keeps failing.")
+
             replied_msg_index = None
 
             result = await self.ollama.generate(
@@ -296,6 +301,7 @@ class AIBotFunctionality(commands.Cog):
                     num_predict=500,
                 ),
             )
+            print(f"LLM response (attempt {i}): {result.response!r}")
 
             meta, _, content = result.response.partition(": ")
             content = content.strip()
@@ -449,9 +455,10 @@ class AIBotFunctionality(commands.Cog):
                 api_key=self.tenor_api_key,
                 limit=3,
             )
-            if not search_results:
-                raise ValueError(f"No Tenor results found for query: {tenor_query}")
-            return str(random.choice(search_results).url)
+            if search_results:
+                return str(random.choice(search_results).url)
+            else:
+                print(f"WARN: No Tenor results found for query: {tenor_query}")
 
         # Any engines that use normal search queries are handled below
         if not self.searx_instance_url:

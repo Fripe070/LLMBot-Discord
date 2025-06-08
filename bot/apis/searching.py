@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import ollama
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from yarl import URL
 import aiohttp
 
@@ -41,14 +41,16 @@ async def generate_search_query(
     max_retries: int = 3,
 ) -> str:
     for _ in range(max_retries):
-        resp = await ollama_api.chat(
+        result = await ollama_api.chat(
             model=model,
             messages=[ollama.Message(role="user", content=f"{ctx}\n\n" + prompt)],
             format=ResponseFormat.model_json_schema(),
         )
         try:
-            return json.loads(resp.message.content or "{}")["most_fitting"].strip()
-        except json.JSONDecodeError:
+            generated = ResponseFormat.model_validate_json(result.message.content or "{}")
+            if generated.most_fitting:
+                return generated.most_fitting
+        except ValidationError:
             continue
     raise ValueError("Failed to generate a valid search query after multiple attempts.")
     
