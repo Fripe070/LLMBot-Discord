@@ -13,9 +13,10 @@ from discord import app_commands
 from discord.ext import commands
 from yarl import URL
 
-import bot.apis as apis
+from bot.config import DUMMY_SNOWFLAKE, ConfigError
+from . import apis
 from bot.bot import LLMBot
-from bot.util.formatting import chop_string, URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
+from .util.formatting import chop_string, URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
 
 type DiscordSnowflake = int
 type ChannelID = DiscordSnowflake
@@ -31,55 +32,19 @@ def get_default_channel_settings() -> ChannelSettings:
         jitter=AIBotFunctionality.DEFAULT_JITTER.total_seconds(),
     )
 
-class AIBotFunctionality(commands.Cog):
+class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
     def __init__(self, bot: LLMBot) -> None:
         self.bot = bot
         self.bg_task: asyncio.Task | None = None
-        self._cached_channel_settings: dict[ChannelID, ChannelSettings] | None = None
 
         self.schedule: dict[ChannelID, datetime.datetime] = {}
 
-        self.max_message_history: int = bot.config.setdefault("message_history_max" , 100)
-        self.max_message_history_reply: int = bot.config.setdefault("message_history_reply", 10)
+        self.message_map: dict[ChannelID, collections.deque[discord.Message]] = {}
 
-        self.message_map: dict[ChannelID, collections.deque[discord.Message]] = collections.defaultdict(
-            lambda: collections.deque(maxlen=max(self.max_message_history, self.max_message_history_reply))
-        )
-
-        self.bot.config.setdefault("allowed_channels", {})
-        self.ollama = ollama_api.AsyncClient(
-            host=bot.config.setdefault("ollama_base_url", "http://localhost:11434"),
-        )
-        self.searx_instance_url: str = bot.config.setdefault("searx_instance_url", "")
-        self.tenor_api_key: str = bot.config.setdefault("tenor_api_key", "").strip()
-
-        self.llm_model_text = bot.config.setdefault("llm_model_text", "llama3.1:8b-text-q4_K_M")
-        self.llm_model_chat = bot.config.setdefault("llm_model_chat", "llama3.1:8b-instruct-q4_K_M")
-        bot.config.setdefault("use_ai_user", True)
-        bot.config.setdefault("activity_limits", {
-            "window": 20,
-            "limit": 3,
-        })
+        self.ollama = ollama_api.AsyncClient(host=bot.config.ollama_url)
 
     DEFAULT_INTERVAL = datetime.timedelta(minutes=10)
     DEFAULT_JITTER = datetime.timedelta(minutes=5)
-
-    @property
-    def channel_settings(self) -> dict[ChannelID, ChannelSettings]:
-        if self._cached_channel_settings is not None:
-            return self._cached_channel_settings
-
-        channels_dict: dict[ChannelID, ChannelSettings] = {}
-        self.bot.config.setdefault("allowed_channels", {})
-        for channel_id, settings in self.bot.config["allowed_channels"].items():
-            if not isinstance(settings, dict):
-                raise TypeError(f"Expected checkup interval settings to be a dict, got {type(settings).__name__}")
-            settings = cast(ChannelSettings, get_default_channel_settings() | settings)
-            self.bot.config["allowed_channels"][str(channel_id)] = dict(settings)
-            channels_dict[int(channel_id)] = settings
-
-        self._cached_channel_settings = channels_dict
-        return channels_dict
 
     async def cog_load(self) -> None:
         def runner_done_callback(task: asyncio.Task[None]) -> None:
@@ -98,11 +63,9 @@ class AIBotFunctionality(commands.Cog):
             self.bg_task.cancel()
         self.bg_task = None
 
-        self._cached_channel_settings = None
-
     @commands.Cog.listener("on_message")
     async def on_message(self, message: discord.Message) -> None:
-        if message.channel.id not in self.channel_settings.keys():
+        if message.channel.id not in self.bot.config.channels:
             return
         if not isinstance(message.channel, discord.TextChannel):
             print(f"WARN: Received message in non-text channel {message.channel.id}, ignoring.")
@@ -149,8 +112,15 @@ class AIBotFunctionality(commands.Cog):
                 print(f'Downloading model "{model_name}" {step.status} {(step.completed or 1) / (step.total or 1) * 100:.2f}%')
 
     async def checkup_runner(self) -> None:
-        await self.ensure_downloaded(self.llm_model_text)
-        await self.ensure_downloaded(self.llm_model_chat)
+        for channel_id in self.bot.config.channels.keys():
+            if channel_id == DUMMY_SNOWFLAKE:
+                raise ConfigError(
+                    f"A channel is using the default (invalid) channel ID of {DUMMY_SNOWFLAKE}. "
+                    "Please update your configuration."
+                )
+
+        await self.ensure_downloaded(self.bot.config.models.text)
+        await self.ensure_downloaded(self.bot.config.models.chat)
 
         await self.bot.wait_until_ready()
 
@@ -161,13 +131,17 @@ class AIBotFunctionality(commands.Cog):
                 print(f"- #{self.bot.get_channel(channel_id)} in {next_time - datetime.datetime.now()}")
 
             iter_start = time.time()
-            for channel_id in self.channel_settings.keys():
+            for channel_id in self.bot.config.channels.keys():
                 if channel_id in self.schedule:
                     next_time = self.schedule[channel_id]
                     if next_time > datetime.datetime.now():
                         continue
                 else:
                     print(f"Channel {channel_id} not in schedule, scheduling now.")
+                    self.message_map.setdefault(
+                        channel_id,
+                        collections.deque(maxlen=self.bot.config.channels[channel_id].max_history),
+                    )
 
                 channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
                 assert isinstance(channel, discord.TextChannel), "Expected channel to be a TextChannel"
@@ -180,13 +154,9 @@ class AIBotFunctionality(commands.Cog):
             await asyncio.sleep(wait_time)
 
     def get_checkup_time(self, channel_id: int) -> datetime.datetime:
-        next_time = datetime.datetime.now() + datetime.timedelta(seconds=self.channel_settings[channel_id]["interval"])
-        next_time += datetime.timedelta(
-            seconds=random.uniform(
-                -self.channel_settings[channel_id]["jitter"],
-                self.channel_settings[channel_id]["jitter"],
-            )
-        )
+        next_time = datetime.datetime.now() + self.bot.config.channels[channel_id].checkup_interval
+        variance = self.bot.config.channels[channel_id].checkup_variance.total_seconds()
+        next_time += datetime.timedelta(seconds=random.uniform(-variance, variance))
         return next_time
 
     async def random_channel_checkup(
@@ -196,17 +166,18 @@ class AIBotFunctionality(commands.Cog):
         *,
         history_override: Sequence[discord.Message] | None = None,
     ) -> None:
-        assert channel.id in self.channel_settings, f"Channel {channel.id} is not an allowed channel"
+        assert channel.id in self.bot.config.channels, f"Channel {channel.id} is not an allowed channel"
+        channel_config = self.bot.config.channels[channel.id]
         print(f"Performing checkup for {channel.name}...")
 
-        relevant_history_length = self.max_message_history_reply if reply_to else self.max_message_history
+        relevant_history_length = channel_config.history_when_responding if reply_to else channel_config.history
         collected_messages: Sequence[discord.Message]
         if history_override is not None:
             collected_messages = history_override[-relevant_history_length:]
         else:
             collected_messages = tuple(self.message_map[channel.id])[-relevant_history_length:]
             if not collected_messages:
-                print(f"No messages collected in {channel.name}. Trying to fetch {self.max_message_history} messages.")
+                print(f"No messages collected in {channel.name}. Trying to fetch {channel_config.max_history} messages.")
                 collected_messages = [
                     msg
                     async for msg in channel.history(
@@ -214,16 +185,17 @@ class AIBotFunctionality(commands.Cog):
                         before=reply_to or datetime.datetime.now(),
                     )
                 ][::-1]  # Reverse to have oldest first
+                self.message_map[channel.id] = collections.deque(collected_messages, maxlen=channel_config.max_history)
 
         msg_process_start = time.perf_counter()
 
         assert self.bot.user is not None, "Bot user must be set"
-        if reply_to is None and self.bot.config["activity_limits"]["limit"] > 0:
+        if reply_to is None and channel_config.activity_limit.max_bot_messages > 0:
             bot_sighting_count: int = 0
-            for i in range(0, -min(self.bot.config["activity_limits"]["window"], len(collected_messages)), -1):
+            for i in range(0, -min(channel_config.activity_limit.window_size, len(collected_messages)), -1):
                 if collected_messages[i].author.id == self.bot.user.id:
                     bot_sighting_count += 1
-                    if bot_sighting_count >= self.bot.config["activity_limits"]["limit"]:
+                    if bot_sighting_count >= channel_config.activity_limit.max_bot_messages:
                         print(f"Skipping checkup for {channel.name} as the bot is too active.")
                         return
 
@@ -269,7 +241,7 @@ class AIBotFunctionality(commands.Cog):
 
         # Enabling the config option would result in the bot acting more consistently with itself
         ai_user_id: int | None = None
-        if self.bot.config["use_ai_user"] and self.bot.user:
+        if channel_config.use_ai_user and self.bot.user:
             ai_user_id = author_indexes.setdefault(self.bot.user.id, len(author_indexes))
 
         prompt += f"[msgid:{len(handled_msg_ids)}] User {"" if ai_user_id is None else ai_user_id}"
@@ -294,7 +266,7 @@ class AIBotFunctionality(commands.Cog):
             replied_msg_index = None
 
             result = await self.ollama.generate(
-                model=self.llm_model_text,
+                model=self.bot.config.models.text,
                 prompt=prompt,
                 options=ollama_api.Options(
                     stop=["\n[msgid:"],
@@ -309,7 +281,7 @@ class AIBotFunctionality(commands.Cog):
                 continue
             # THe first part should be the user ID, but we don't use it so it's ignored
             predicted_user_id, _, reply_str = meta.partition(" ")
-            if self.bot.config["use_ai_user"] and predicted_user_id:
+            if channel_config.use_ai_user and predicted_user_id:
                 continue # If we already have a predetermined user ID, the bot is not allowed to append to it
 
             if reply_str:
@@ -439,20 +411,20 @@ class AIBotFunctionality(commands.Cog):
         if not parsed_url.host:
             return None
 
-        if self.tenor_api_key and (
+        if self.bot.config.google_api_key and (
             parsed_url.host.endswith(("tenor.com", "giphy.com")) 
             or parsed_url.suffix in {".gif", ".webp"}
         ):
             tenor_query = await apis.searching.generate_search_query(
                 "\n".join(msg.content for msg in history_context),
                 prompt=apis.searching.GIF_PROMPT,
-                model=self.bot.config["llm_model_chat"],
+                model=self.bot.config.models.chat,
                 ollama_api=self.ollama,
             )
             print(f"Searching Tenor for: {tenor_query}")
             search_results = await apis.searching.search_tenor(
                 tenor_query,
-                api_key=self.tenor_api_key,
+                api_key=self.bot.config.google_api_key,
                 limit=3,
             )
             if search_results:
@@ -461,12 +433,12 @@ class AIBotFunctionality(commands.Cog):
                 print(f"WARN: No Tenor results found for query: {tenor_query}")
 
         # Any engines that use normal search queries are handled below
-        if not self.searx_instance_url:
+        if not self.bot.config.searx_url:
             print(f"Skipping URL {url} as no Searx instance URL is configured.")
             return url
         query = await apis.searching.generate_search_query(
             "\n".join(msg.content for msg in history_context),
-            model=self.bot.config["llm_model_chat"],
+            model=self.bot.config.models.chat,
             ollama_api=self.ollama,
         )
         print(f"Generated query for URL {url}: {query}")
@@ -474,7 +446,7 @@ class AIBotFunctionality(commands.Cog):
         if parsed_url.host.endswith(("youtube.com", "youtu.be")):
             search_results = await apis.searching.search_searx(
                 query,
-                api_url=self.searx_instance_url,
+                api_url=self.bot.config.searx_url,
                 engines=["youtube"]
             )
             if not search_results:
@@ -482,72 +454,10 @@ class AIBotFunctionality(commands.Cog):
             return str(search_results[0].url)
 
         # We just search for the query in general search engines
-        search_results = await apis.searching.search_searx(query, api_url=self.searx_instance_url)
+        search_results = await apis.searching.search_searx(query, api_url=self.bot.config.searx_url)
         if not search_results:
             raise ValueError(f"No search results found for query: {query}")
         return str(search_results[0].url)
-
-    cmd_group = app_commands.Group(
-        name="channel",
-        description="Manage AI bot channels",
-        guild_only=True,
-        default_permissions=discord.Permissions(manage_channels=True),
-    )
-
-    @cmd_group.command(name="add", description="Add a channel to the AI bot's list of allowed channels")
-    async def add_channel(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        if channel.id in self.channel_settings:
-            await interaction.response.send_message(f"{channel.mention} is already an allowed channel.", ephemeral=True)
-            return
-        self.bot.config["allowed_channels"][str(channel.id)] = get_default_channel_settings()
-        self._cached_channel_settings = None  # Invalidate cache
-
-        await interaction.response.send_message(f"Added {channel.mention} to allowed channels.", ephemeral=True)
-
-    @cmd_group.command(name="remove", description="Remove a channel from the AI bot's list of allowed channels")
-    async def remove_channel(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        if channel.id not in self.channel_settings:
-            await interaction.response.send_message(f"{channel.mention} is not an allowed channel.", ephemeral=True)
-            return
-
-        del self.bot.config["allowed_channels"][str(channel.id)]
-        self._cached_channel_settings = None  # Invalidate cache
-        if channel.id in self.schedule:
-            del self.schedule[channel.id]
-        if channel.id in self.message_map:
-            del self.message_map[channel.id]
-
-        await interaction.response.send_message(f"Removed {channel.mention} from allowed channels.", ephemeral=True)
-
-    @cmd_group.command(name="interval", description="Set the checkup interval for a channel")
-    async def set_interval(self, interaction: discord.Interaction, channel: discord.TextChannel, minutes: int) -> None:
-        if channel.id not in self.channel_settings:
-            await interaction.response.send_message(f"{channel.mention} is not an allowed channel.", ephemeral=True)
-            return
-        if minutes < 0:
-            await interaction.response.send_message("Interval must be non-negative.", ephemeral=True)
-            return
-
-        # Settings will by now be populated by the earlier settings property access, so we can assume the key exists
-        self.channel_settings[channel.id]["interval"] = minutes * 60.0
-        self._cached_channel_settings = None  # Invalidate cache
-
-        await interaction.response.send_message(
-            f"Set checkup interval for {channel.mention} to {minutes} minutes.", ephemeral=True
-        )
-
-    @cmd_group.command(name="jitter", description="Set the maximum interval variation (jitter) for a channel")
-    async def set_jitter(self, interaction: discord.Interaction, channel: discord.TextChannel, minutes: float) -> None:
-        if channel.id not in self.channel_settings:
-            await interaction.response.send_message(f"{channel.mention} is not an allowed channel.", ephemeral=True)
-            return
-        minutes = abs(minutes)
-
-        # Settings will by now be populated by the earlier settings property access, so we can assume the key exists
-        self.channel_settings[channel.id]["jitter"] = minutes * 60.0
-        self._cached_channel_settings = None
-
-        await interaction.response.send_message(f"Set jitter for {channel.mention} to {minutes} minutes.", ephemeral=True)
 
 
 async def setup(bot: LLMBot) -> None:

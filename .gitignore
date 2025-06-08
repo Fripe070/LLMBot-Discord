@@ -1,4 +1,6 @@
-config.json
+config*.json*
+
+logs/
 
 .idea/
 .vscode/

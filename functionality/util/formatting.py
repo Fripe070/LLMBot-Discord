@@ -33,7 +33,7 @@ class TimestampStyle(enum.Enum):
     R = "R"  # Relative time (e.g., "in 5 minutes")
 
 
-def timestamp(dt: datetime.datetime, style: TimestampStyle = TimestampStyle.f) -> str:
+def to_timestamp(dt: datetime.datetime, style: TimestampStyle = TimestampStyle.f) -> str:
     """
     Format a datetime object as a Discord timestamp.
     
@@ -42,6 +42,19 @@ def timestamp(dt: datetime.datetime, style: TimestampStyle = TimestampStyle.f) -
     :return: A formatted string containing the Discord timestamp.
     """
     return f"<t:{int(dt.timestamp())}:{style.value}>"
+
+
+def from_timestamp(timestamp: str) -> datetime.datetime:
+    """
+    Convert a Discord timestamp string back to a datetime object.
+    
+    :param timestamp: The Discord timestamp string (e.g., "<t:1234567890:R>").
+    :return: A datetime object representing the timestamp.
+    """
+    match = re.match(r"<t:(\d+)(?::[tTdDfFR])?>", timestamp)
+    if not match:
+        raise ValueError("Invalid Discord timestamp format.")
+    return datetime.datetime.fromtimestamp(int(match.group(1)), tz=datetime.timezone.utc)
 
 
 # noinspection PyShadowingBuiltins
