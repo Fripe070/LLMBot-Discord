@@ -115,10 +115,6 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             if len(history) <= 0:
                 _logger.debug(f"No messages in channel {channel_obj.name} to process. Skipping checkup.")
                 continue
-            assert len(history) <= channel_config.max_history, (
-                f"Channel {channel_obj.name} has more messages ({len(history)}) "
-                f"than the configured maximum ({channel_config.max_history})."
-            )
 
             if not self.is_too_active(history, channel_config):
                 await self.channel_checkup(
@@ -178,6 +174,10 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                     limit=channel_config.history_when_responding - len(history),
                 ):
                     history.appendleft(msg)
+
+            assert all(msg.id <= message.id for msg in history) and history[-1].id == message.id, (
+                "Latest message in history should be the one that triggered the checkup."
+            )
 
             await self.channel_checkup(
                 channel=message.channel,
@@ -279,7 +279,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 replying_to_index = len(ctx.history) - 1
                 content = result.response.strip()
             else:
-                reply_prefix, reply_suffix = "(Replying to [msgid:", "]): "
+                reply_prefix, reply_suffix = "(replying to [msgid:", "]): "
                 if not result.response.lstrip().startswith(reply_prefix):
                     content = result.response.strip().removeprefix(": ")
                 else:
@@ -287,12 +287,15 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                     try:
                         replying_to_index = int(reply_i_str.strip())
                     except ValueError:
+                        _logger.debug(f"Invalid reply index in response: {reply_i_str!r}. Skipping this response.")
                         continue
                     if replying_to_index < 0 or replying_to_index >= len(ctx.history):
+                        _logger.debug(f"Reply index {replying_to_index} out of bounds for history length {len(ctx.history)}. Skipping this response.")
                         continue
 
             content = await self.process_outgoing(content, ctx=ctx)
             if content is None:
+                _logger.debug(f"Processed content is None for response: {result.response!r}. Skipping this response.")
                 continue
             return content, ctx.history[replying_to_index] if replying_to_index is not None else None
 
@@ -329,6 +332,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         # Almost guaranteed to be an invalid response
         if re.search(r"[msgid:[0-9]+]", content):
+            _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
             return None
 
         # Replace emotes with their Discord representation
@@ -343,9 +347,11 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         ):
             match_index_int = int(match_index)
             if 0 <= match_index_int >= len(inverse_author_indexes):
+                _logger.debug(f"Invalid author index {match_index_int} in content: {content!r}. Skipping processing.")
                 return None
             mapped_snowflake = inverse_author_indexes.get(match_index_int, None)
             if mapped_snowflake is None:
+                _logger.debug(f"Author index {match_index_int} not found in author indexes: {ctx.author_indexes}. Skipping processing.")
                 return None
             content = content.replace(match_full, f"<@{mapped_snowflake}>")
 
@@ -361,6 +367,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         )
         for original_url, processed_url in zip(urls, processed_urls):
             if processed_url is None:
+                _logger.debug(f"URL {original_url} could not be processed. Skipping.")
                 continue
             if not isinstance(processed_url, str):
                 _logger.debug(f"Error processing URL {original_url}: {processed_url!r}")
@@ -433,7 +440,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             if not search_results:
                 raise ValueError(f"No search results found for query: {query}")
             return str(search_results[0].url)
-        
+
         _logger.debug(f"Skipping URL {url} as it went unhandled.")
         return None
 

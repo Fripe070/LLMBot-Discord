@@ -30,8 +30,6 @@ class LLMBot(commands.Bot):
         config_path: PathLike[str] | str = "config.json",
         log_directory: PathLike[str] | str = "logs/",
     ) -> None:
-        self.config = BotConfig.load(Path(config_path))
-
         log_utils.setup_logging(Path(log_directory), level=logging.INFO)
         logging.getLogger(functionality.__name__).setLevel(logging.DEBUG)
 
@@ -39,6 +37,8 @@ class LLMBot(commands.Bot):
         def handle_exception(exc_type: type[BaseException], value: BaseException, traceback: TracebackType) -> None:
             _logger.critical(f"Uncaught {exc_type.__name__}: {value}", exc_info=(exc_type, value, traceback))
         sys.excepthook = handle_exception
+        
+        self.config = BotConfig.load(Path(config_path))
 
         async def runner():
             async with self:
