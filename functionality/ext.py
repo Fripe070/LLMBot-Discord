@@ -1,270 +1,267 @@
 import asyncio
 import collections
+import dataclasses
 import datetime
+import logging
 import random
 import re
 import time
 from collections.abc import Sequence
-from typing import TypedDict, cast
 
 import discord
 import ollama as ollama_api
-from discord import app_commands
 from discord.ext import commands
 from yarl import URL
 
-from bot.config import DUMMY_SNOWFLAKE, ConfigError
-from . import apis
 from bot.bot import LLMBot
+from bot.config import DUMMY_SNOWFLAKE, ConfigError, ChannelConfig
+from .apis import llm, searching
 from .util.formatting import chop_string, URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
 
 type DiscordSnowflake = int
 type ChannelID = DiscordSnowflake
 type MessageID = DiscordSnowflake
 
-class ChannelSettings(TypedDict):
-    interval: float
-    jitter: float
 
-def get_default_channel_settings() -> ChannelSettings:
-    return ChannelSettings(
-        interval=AIBotFunctionality.DEFAULT_INTERVAL.total_seconds(),
-        jitter=AIBotFunctionality.DEFAULT_JITTER.total_seconds(),
-    )
+_logger = logging.getLogger(__name__)
+
+MAX_GENERATION_RETRIES: int = 15
+
+@dataclasses.dataclass(kw_only=True)
+class CheckupContext:
+    config: ChannelConfig
+    channel: discord.TextChannel
+    history: Sequence[discord.Message]
+    author_indexes: dict[DiscordSnowflake, int] = dataclasses.field(default_factory=dict)
+    is_response_to_latest: bool
+
 
 class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
     def __init__(self, bot: LLMBot) -> None:
         self.bot = bot
         self.bg_task: asyncio.Task | None = None
-
-        self.schedule: dict[ChannelID, datetime.datetime] = {}
-
-        self.message_map: dict[ChannelID, collections.deque[discord.Message]] = {}
+        self.is_cog_ready: bool = False
 
         self.ollama = ollama_api.AsyncClient(host=bot.config.ollama_url)
 
-    DEFAULT_INTERVAL = datetime.timedelta(minutes=10)
-    DEFAULT_JITTER = datetime.timedelta(minutes=5)
+        self.schedule: dict[discord.TextChannel, datetime.datetime] = {}
+        self.channel_histories: dict[ChannelID, collections.deque[discord.Message]] = {}
 
-    async def cog_load(self) -> None:
-        def runner_done_callback(task: asyncio.Task[None]) -> None:
-            try:
-                task.result()  # Raises if the task failed
-            except asyncio.CancelledError:
-                print("Checkup runner task was cancelled.")
-            finally:
-                self.bg_task = None
-
-        self.bg_task = self.bot.loop.create_task(self.checkup_runner())
-        self.bg_task.add_done_callback(runner_done_callback)
-
-    async def cog_unload(self) -> None:
-        if self.bg_task is not None and not self.bg_task.done():
-            self.bg_task.cancel()
-        self.bg_task = None
-
-    @commands.Cog.listener("on_message")
-    async def on_message(self, message: discord.Message) -> None:
-        if message.channel.id not in self.bot.config.channels:
-            return
-        if not isinstance(message.channel, discord.TextChannel):
-            print(f"WARN: Received message in non-text channel {message.channel.id}, ignoring.")
-            return
-
-        # TODO: Temporary. Will exclude images which I dont rly want. Solution until embeds/attachments are handled
-        if not message.content.strip():
-            return
-
-        self.message_map[message.channel.id].append(message)
-
-        assert self.bot.user is not None, "Bot user must be set"
-        if self.bot.user in message.mentions or (
-            message.reference is not None and message.reference.cached_message is not None
-            and message.reference.cached_message.author.id == self.bot.user.id
-        ):
-            await self.random_channel_checkup(
-                message.channel,
-                reply_to=message,  # Reply to the message that triggered the checkup
-            )
-
-    async def ensure_downloaded(self, model_name: str) -> None:
-        def get_model_name(model: ollama_api.ListResponse.Model) -> str:
-            if model.model is None:
-                return ""
-            name, _, version = model.model.partition(":")
-            if version == "latest":
-                return name
-            return f"{name}:{version}"
-
-        def models_match(a: ollama_api.ListResponse.Model | str, b: ollama_api.ListResponse.Model | str) -> bool:
-            if isinstance(a, ollama_api.ListResponse.Model):
-                a = get_model_name(a)
-            if isinstance(b, ollama_api.ListResponse.Model):
-                b = get_model_name(b)
-            if not a or not b:
-                return False
-            return a == b
-
-        if any(models_match(model, model_name) for model in (await self.ollama.list()).models):
-            print(f'Skipping download of "{model_name}" as it is already downloaded.')
-        else:
-            async for step in await self.ollama.pull(model_name, stream=True):
-                print(f'Downloading model "{model_name}" {step.status} {(step.completed or 1) / (step.total or 1) * 100:.2f}%')
-
-    async def checkup_runner(self) -> None:
-        for channel_id in self.bot.config.channels.keys():
-            if channel_id == DUMMY_SNOWFLAKE:
+        for channel in self.bot.config.channels.values():
+            if channel.channel_id == DUMMY_SNOWFLAKE:
                 raise ConfigError(
                     f"A channel is using the default (invalid) channel ID of {DUMMY_SNOWFLAKE}. "
                     "Please update your configuration."
                 )
 
-        await self.ensure_downloaded(self.bot.config.models.text)
-        await self.ensure_downloaded(self.bot.config.models.chat)
+    async def cog_load(self) -> None:
+        def runner_done_callback(task: asyncio.Task[None]) -> None:
+            try:
+                task.result()  # Propagate any exceptions raised in the background task
+            except asyncio.CancelledError:
+                _logger.debug("Background runner task was cancelled.")
+
+        self.bg_task = self.bot.loop.create_task(self.background_runner())
+        self.bg_task.add_done_callback(runner_done_callback)
+
+    async def cog_unload(self) -> None:
+        if self.bg_task is not None and not self.bg_task.done():
+            self.bg_task.cancel()
+
+    async def background_runner(self) -> None:
+        await llm.ensure_downloaded(self.bot.config.models.text, client=self.ollama)
+        await llm.ensure_downloaded(self.bot.config.models.chat, client=self.ollama)
 
         await self.bot.wait_until_ready()
 
+        # Initialise mappings and schedule initial checkups
+        for channel_config in self.bot.config.channels.values():
+            channel_obj = (
+                self.bot.get_channel(channel_config.channel_id)
+                or await self.bot.fetch_channel(channel_config.channel_id)
+            )
+            if not isinstance(channel_obj, discord.TextChannel):
+                raise ConfigError(
+                    f"Channel {channel_config.channel_id} is not a valid text channel. "
+                    "Please check your configuration."
+                )
+            self.schedule[channel_obj] = datetime.datetime.now() # ASAP
+            self.channel_histories[channel_obj.id] = collections.deque(maxlen=channel_config.max_history)
+            _logger.debug(f"Initialising channel history for #{channel_obj.name} with {channel_config.max_history} messages.")
+            async for msg in channel_obj.history(before=datetime.datetime.now(), limit=channel_config.max_history):
+                self.channel_histories[channel_obj.id].appendleft(msg)
+
+        self.is_cog_ready = True
+
+        min_checkup_interval: datetime.timedelta = min(
+            channel_config.checkup_interval - channel_config.checkup_variance
+            for channel_config in self.bot.config.channels.values()
+        )
+        _logger.debug(f"Checkup loop starting with a minimum interval of {min_checkup_interval.total_seconds():.2f} seconds.")
         while True:
-            # TODO: Remove this print statement
-            print("Currently scheduled:")
-            for channel_id, next_time in self.schedule.items():
-                print(f"- #{self.bot.get_channel(channel_id)} in {next_time - datetime.datetime.now()}")
+            start_time: float = time.perf_counter()
+            await self.check_scheduled_channels()
+            elapsed_time: float = time.perf_counter() - start_time
+            # We don't want to hog the event loop
+            await asyncio.sleep(max(0.0, min_checkup_interval.total_seconds() - elapsed_time))
 
-            iter_start = time.time()
-            for channel_id in self.bot.config.channels.keys():
-                if channel_id in self.schedule:
-                    next_time = self.schedule[channel_id]
-                    if next_time > datetime.datetime.now():
-                        continue
-                else:
-                    print(f"Channel {channel_id} not in schedule, scheduling now.")
-                    self.message_map.setdefault(
-                        channel_id,
-                        collections.deque(maxlen=self.bot.config.channels[channel_id].max_history),
-                    )
+    async def check_scheduled_channels(self):
+        for channel_obj, scheduled_for in self.schedule.items():
+            if scheduled_for > datetime.datetime.now():
+                continue
+            channel_config = self.bot.config.channels[channel_obj.id]
 
-                channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
-                assert isinstance(channel, discord.TextChannel), "Expected channel to be a TextChannel"
-                await self.random_channel_checkup(channel)
-                self.schedule[channel_id] = self.get_checkup_time(channel_id)
-                print(f"Scheduled next checkup for {channel.name} at {self.schedule[channel_id]}")
+            history: Sequence[discord.Message] = self.channel_histories[channel_obj.id]
+            if len(history) <= 0:
+                _logger.debug(f"No messages in channel {channel_obj.name} to process. Skipping checkup.")
+                continue
+            assert len(history) <= channel_config.max_history, (
+                f"Channel {channel_obj.name} has more messages ({len(history)}) "
+                f"than the configured maximum ({channel_config.max_history})."
+            )
 
-            time_taken = time.time() - iter_start
-            wait_time = max(0.0, 20.0 - time_taken)
-            await asyncio.sleep(wait_time)
+            if not self.is_too_active(history, channel_config):
+                await self.channel_checkup(
+                    channel=channel_obj,
+                    history=history,
+                )
+            else:
+                _logger.debug(f"Channel {channel_obj.name} is too active. Skipping checkup.")
+            # Reschedule
+            self.schedule[channel_obj] = datetime.datetime.now() + channel_config.random_interval()
 
-    def get_checkup_time(self, channel_id: int) -> datetime.datetime:
-        next_time = datetime.datetime.now() + self.bot.config.channels[channel_id].checkup_interval
-        variance = self.bot.config.channels[channel_id].checkup_variance.total_seconds()
-        next_time += datetime.timedelta(seconds=random.uniform(-variance, variance))
-        return next_time
+    def is_too_active(self, history: Sequence[discord.Message], channel_config: ChannelConfig) -> bool:
+        """Check if the bot is too active in the channel."""
+        assert self.bot.user is not None, "Not logged in. Cannot check bot activity."
+        if channel_config.activity_limit.max_bot_messages <= 0:
+            return False
+        bot_sighting_count: int = 0
+        for i in range(-channel_config.activity_limit.window_size, 0):
+            if history[i].author.id == self.bot.user.id:
+                bot_sighting_count += 1
+                if bot_sighting_count >= channel_config.activity_limit.max_bot_messages:
+                    return True
+        return False
 
-    async def random_channel_checkup(
+    @commands.Cog.listener("on_message")
+    async def on_message(self, message: discord.Message) -> None:
+        if not self.is_cog_ready:
+            return
+
+        if message.channel.id not in self.bot.config.channels:
+            return
+        assert isinstance(message.channel, discord.TextChannel), (
+            f"Message channel {message.channel.id} is not a text channel. "
+            f"THis is the result of illegal config state that should have failed a check earlier. "
+        )
+
+        # TODO: Temporary. Will exclude images which I dont rly want. Solution until embeds/attachments are handled
+        if not message.content.strip():
+            return
+
+        self.channel_histories[message.channel.id].append(message)
+
+        if self.bot.user in message.mentions and not message.author.id == self.bot.user.id:
+            _logger.debug(f"Message {message.id} in #{message.channel.name} mentions the bot. Performing checkup.")
+            channel_config = self.bot.config.channels[message.channel.id]
+
+            history: collections.deque[discord.Message] = collections.deque(
+                maxlen=channel_config.history_when_responding,
+            )
+            for msg in reversed(self.channel_histories[message.channel.id]):
+                if msg.id < message.id and len(history) < channel_config.history_when_responding:
+                    history.appendleft(msg)
+            if len(history) < channel_config.history_when_responding:
+                # Fill out the rest with a fetch
+                async for msg in message.channel.history(
+                    before=history[0],
+                    limit=channel_config.history_when_responding - len(history),
+                ):
+                    history.appendleft(msg)
+
+            await self.channel_checkup(
+                channel=message.channel,
+                history=history,
+                is_response_to_latest=True,
+            )
+
+    async def channel_checkup(
         self,
-        channel: discord.TextChannel,
-        reply_to: discord.Message | None = None,
         *,
-        history_override: Sequence[discord.Message] | None = None,
+        channel: discord.TextChannel,
+        history: Sequence[discord.Message],
+        is_response_to_latest: bool = False,
     ) -> None:
-        assert channel.id in self.bot.config.channels, f"Channel {channel.id} is not an allowed channel"
-        channel_config = self.bot.config.channels[channel.id]
-        print(f"Performing checkup for {channel.name}...")
+        assert all(
+            msg1.id < msg2.id
+            for msg1, msg2 in zip(history, tuple(history)[1:])
+        ), "History messages are out of order. Later messages should have higher IDs than earlier ones."
 
-        relevant_history_length = channel_config.history_when_responding if reply_to else channel_config.history
-        collected_messages: Sequence[discord.Message]
-        if history_override is not None:
-            collected_messages = history_override[-relevant_history_length:]
-        else:
-            collected_messages = tuple(self.message_map[channel.id])[-relevant_history_length:]
-            if not collected_messages:
-                print(f"No messages collected in {channel.name}. Trying to fetch {channel_config.max_history} messages.")
-                collected_messages = [
-                    msg
-                    async for msg in channel.history(
-                        limit=relevant_history_length,
-                        before=reply_to or datetime.datetime.now(),
-                    )
-                ][::-1]  # Reverse to have oldest first
-                self.message_map[channel.id] = collections.deque(collected_messages, maxlen=channel_config.max_history)
-
-        msg_process_start = time.perf_counter()
-
-        assert self.bot.user is not None, "Bot user must be set"
-        if reply_to is None and channel_config.activity_limit.max_bot_messages > 0:
-            bot_sighting_count: int = 0
-            for i in range(0, -min(channel_config.activity_limit.window_size, len(collected_messages)), -1):
-                if collected_messages[i].author.id == self.bot.user.id:
-                    bot_sighting_count += 1
-                    if bot_sighting_count >= channel_config.activity_limit.max_bot_messages:
-                        print(f"Skipping checkup for {channel.name} as the bot is too active.")
-                        return
-
-        author_indexes: dict[DiscordSnowflake, int] = {}
-        handled_msg_ids: list[MessageID] = []
-        handled_rows: list[str] = []
-
-        for msg_index, message in enumerate(collected_messages):
-            if reply_to is not None and message.id > reply_to.id: # Larger IDs are newer
-                break
-
-            author_index = author_indexes.setdefault(message.webhook_id or message.author.id, len(author_indexes))
-            history_string = f"[msgid:{msg_index}] User {author_index}"
-
-            if message.reference is not None:
-                referenced_index: int | None = None
-                for i, handled_msg_id in enumerate(handled_msg_ids):
-                    if handled_msg_id == message.reference.message_id:
-                        referenced_index = i
-                        break
-                if referenced_index is not None:
-                    assert collected_messages[referenced_index].id == message.reference.message_id, (
-                        f"Collected message ID does not match reference: "
-                        f"{collected_messages[referenced_index].id} != {message.reference.message_id}"
-                    )
-                    history_string += f" (replying to [msgid:{referenced_index}])"
-
-            history_string += ": "
-            history_string += await self.process_incoming(message, author_indexes=author_indexes)
-
-            handled_rows.append(history_string)
-            handled_msg_ids.append(message.id)
+        ctx = CheckupContext(
+            config=self.bot.config.channels[channel.id],
+            channel=channel,
+            history=history,
+            is_response_to_latest=is_response_to_latest,
+        )
 
         prompt: str = (
             "The following is the chat history of a Discord channel. Markdown is supported.\n"
-            "Mention format: `@UserID`. For example: @1 for User 1.\n"
+            "Mention format: `@UserID`. For example: @1 for User #1.\n"
         )
         if channel.guild.emojis:
             emojis = " ".join(f":{emoji.name}:" for emoji in channel.guild.emojis)
             prompt += f"Chatroom emotes: {emojis}\n"
 
-        prompt += "\n" + "\n".join(handled_rows) + "\n"
+        prompt += "\n" + "\n".join(await self.gather_prompt_history(ctx)) + "\n"
 
-        # Enabling the config option would result in the bot acting more consistently with itself
-        ai_user_id: int | None = None
-        if channel_config.use_ai_user and self.bot.user:
-            ai_user_id = author_indexes.setdefault(self.bot.user.id, len(author_indexes))
+        assert self.bot.user is not None, "Bot user is not set."
+        prompt += f"[msgid:{len(history)}] User #"
+        if ctx.config.talk_as_bot:
+            prompt += str(ctx.author_indexes.setdefault(self.bot.user.id, len(ctx.author_indexes)))
+        else:
+            # TODO: Attempt to have the LLM predict the author rather than using a random one
+            prompt += str(random.choice(tuple(ctx.author_indexes.values())))
 
-        prompt += f"[msgid:{len(handled_msg_ids)}] User {"" if ai_user_id is None else ai_user_id}"
-        if reply_to is not None:
-            prompt += f" (Replying to [msgid:{len(handled_msg_ids) - 1}])"
+        if is_response_to_latest:
+            prompt += f" (Replying to [msgid:{len(history) - 1}]): "
 
-        msg_process_end = time.perf_counter()
-        print(f"Processed {len(collected_messages)} messages in {msg_process_end - msg_process_start:.2f} seconds.")
+        _logger.debug(f"Working prompt for channel #{channel.name}:\n{prompt}")
 
-        print(prompt)
-        print(repr(prompt))
+        response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
 
-        # We simply retry until we get a valid response from the LLM.
-        response_content: str | None = None
-        replied_msg_index: int | None = None
-        i = 0
-        while response_content is None:
-            i += 1
-            if i > 10:
-                print(f"WARNING: On attempt {i}. Might never terminate if the LLM keeps failing.")
+        _logger.debug(f"Sending message in #{channel.name}:\n{response_content}")
 
-            replied_msg_index = None
+        allowed_mentions = discord.AllowedMentions(replied_user=True, users=True, everyone=False, roles=False)
+        # TODO: Do something more intelligent than just chopping the string
+        if reply_to is None:
+            await channel.send(
+                content=chop_string(response_content, 2000),
+                allowed_mentions=allowed_mentions,
+            )
+        else:
+            await reply_to.reply(
+                content=chop_string(response_content, 2000),
+                allowed_mentions=allowed_mentions,
+            )
 
+    async def gather_prompt_history(self, ctx: CheckupContext) -> Sequence[str]:
+        processed_history: list[str] = []
+        for message_index, message in enumerate(ctx.history):
+            author_index = ctx.author_indexes.setdefault(message.webhook_id or message.author.id, len(ctx.author_indexes))
+            working_string = f"[msgid:{message_index}] User #{author_index}"
+            if message.reference is not None and message.reference.message_id is not None:
+                for i in range(len(ctx.history)):
+                    if ctx.history[i].id == message.reference.message_id:
+                        working_string += f" (replying to [msgid:{i}])"
+                        break
+            working_string += ": "
+            working_string += await self.process_incoming(message, ctx=ctx)
+            processed_history.append(working_string)
+        return processed_history
+
+    async def generate_response(self, prompt: str, *, ctx: CheckupContext) -> tuple[str, discord.Message | None]:
+        # We simply retry until we get a valid response from the LLM. It can be finicky sometimes.
+        for attempt_index in range(MAX_GENERATION_RETRIES):
             result = await self.ollama.generate(
                 model=self.bot.config.models.text,
                 prompt=prompt,
@@ -272,58 +269,40 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                     stop=["\n[msgid:"],
                     num_predict=500,
                 ),
+                keep_alive=5,
             )
-            print(f"LLM response (attempt {i}): {result.response!r}")
+            _logger.debug(f"LLM response (attempt {attempt_index + 1}): {result.response!r}")
 
-            meta, _, content = result.response.partition(": ")
-            content = content.strip()
-            if not content:
+            content: str | None
+            replying_to_index: int | None = None
+            if ctx.is_response_to_latest:
+                replying_to_index = len(ctx.history) - 1
+                content = result.response.strip()
+            else:
+                reply_prefix, reply_suffix = "(Replying to [msgid:", "]): "
+                if not result.response.lstrip().startswith(reply_prefix):
+                    content = result.response.strip().removeprefix(": ")
+                else:
+                    reply_i_str, _, content = result.response.lstrip().removeprefix(reply_prefix).partition(reply_suffix)
+                    try:
+                        replying_to_index = int(reply_i_str.strip())
+                    except ValueError:
+                        continue
+                    if replying_to_index < 0 or replying_to_index >= len(ctx.history):
+                        continue
+
+            content = await self.process_outgoing(content, ctx=ctx)
+            if content is None:
                 continue
-            # THe first part should be the user ID, but we don't use it so it's ignored
-            predicted_user_id, _, reply_str = meta.partition(" ")
-            if channel_config.use_ai_user and predicted_user_id:
-                continue # If we already have a predetermined user ID, the bot is not allowed to append to it
+            return content, ctx.history[replying_to_index] if replying_to_index is not None else None
 
-            if reply_str:
-                if not reply_str.startswith("Replying to [msgid:") or not reply_str.endswith("])"):
-                    continue  # Invalid response format
-                try:
-                    replied_msg_index = int(reply_str[len("Replying to [msgid:") : -len("])")])
-                except ValueError:
-                    continue
-                if replied_msg_index < 0 or replied_msg_index >= len(handled_msg_ids):
-                    continue
-            if reply_to is not None:
-                replied_msg_index = len(handled_msg_ids) - 1
-
-            print("Unprocessed LLM response:", content)
-
-            response_content = await self.process_outgoing(
-                content,
-                channel=channel,
-                author_indexes=author_indexes,
-                history_context=collected_messages,
-            )
-
-        print(f"Final LLM response: {response_content}")
-
-        allowed_mentions = discord.AllowedMentions(replied_user=True, users=True, everyone=False, roles=False)
-        if replied_msg_index is None:
-            await channel.send(
-                content=chop_string(response_content, 2000),
-                allowed_mentions=allowed_mentions,
-            )
-        else:
-            await collected_messages[replied_msg_index].reply(
-                content=chop_string(response_content, 2000),
-                allowed_mentions=allowed_mentions,
-            )
+        raise RuntimeError(f"Failed to generate a valid response after {MAX_GENERATION_RETRIES} attempts.")
 
     async def process_incoming(
         self,
         message: discord.Message,
         *,
-        author_indexes: dict[DiscordSnowflake, int],
+        ctx: CheckupContext,
     ) -> str:
         # TODO: Surface more message data (e.g. attachments, embeds, images)
         content = message.content.strip()
@@ -335,7 +314,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         # Replace mentions with their index in the author_indexes
         for match_full, match_snowflake in re.findall(r"(<@!?([0-9]+)>)", content):
-            mapped_snowflake = author_indexes.setdefault(int(match_snowflake), len(author_indexes))
+            mapped_snowflake = ctx.author_indexes.setdefault(int(match_snowflake), len(ctx.author_indexes))
             content = content.replace(match_full, f"@{mapped_snowflake}")
 
         return content
@@ -344,9 +323,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         self,
         content: str,
         *,
-        channel: discord.TextChannel,
-        author_indexes: dict[DiscordSnowflake, int],
-        history_context: Sequence[discord.Message],
+        ctx: CheckupContext,
     ) -> str | None:
         # TODO: *Technically* we should have a check for if the content is in a codeblock
 
@@ -355,11 +332,11 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             return None
 
         # Replace emotes with their Discord representation
-        emoji_map = {f":{emoji.name}:": emoji for emoji in channel.guild.emojis}
+        emoji_map = {f":{emoji.name}:": emoji for emoji in ctx.channel.guild.emojis}
         for emoji_str, emoji in emoji_map.items():
             content = content.replace(emoji_str, str(emoji))
 
-        inverse_author_indexes = {v: k for k, v in author_indexes.items()}
+        inverse_author_indexes = {v: k for k, v in ctx.author_indexes.items()}
         for match_full, match_index in (
             *re.findall(r"(@([0-9]+)\b)", content),
             *re.findall(r"(\bUser ?([0-9]+)\b)", content, flags=re.IGNORECASE),
@@ -379,16 +356,16 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         ]
         urls: set[str] = {match["url"] for match in links}
         processed_urls: list[str | None | BaseException] = await asyncio.gather(
-            *(self.process_url(url, history_context=history_context) for url in urls),
+            *(self.process_url(url, ctx=ctx) for url in urls),
             return_exceptions=True,
         )
         for original_url, processed_url in zip(urls, processed_urls):
             if processed_url is None:
                 continue
             if not isinstance(processed_url, str):
-                print(f"Error processing URL {original_url}: {processed_url}")
+                _logger.debug(f"Error processing URL {original_url}: {processed_url!r}")
                 continue
-            print(f"{original_url} -> {processed_url}")
+            _logger.debug(f"{original_url} -> {processed_url}")
             content = content.replace(original_url, processed_url)
 
         # TODO: Images
@@ -400,7 +377,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         self,
         url: str,
         *,
-        history_context: Sequence[discord.Message],
+        ctx: CheckupContext,
     ) -> str | None:
         try:
             parsed_url: URL = URL(url)
@@ -412,17 +389,17 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             return None
 
         if self.bot.config.google_api_key and (
-            parsed_url.host.endswith(("tenor.com", "giphy.com")) 
+            parsed_url.host.endswith(("tenor.com", "giphy.com"))
             or parsed_url.suffix in {".gif", ".webp"}
         ):
-            tenor_query = await apis.searching.generate_search_query(
-                "\n".join(msg.content for msg in history_context),
-                prompt=apis.searching.GIF_PROMPT,
+            tenor_query = await searching.generate_search_query(
+                "\n".join(msg.content for msg in ctx.history),
+                prompt=searching.GIF_PROMPT,
                 model=self.bot.config.models.chat,
                 ollama_api=self.ollama,
             )
-            print(f"Searching Tenor for: {tenor_query}")
-            search_results = await apis.searching.search_tenor(
+            _logger.debug(f"Searching Tenor for: {tenor_query}")
+            search_results = await searching.search_tenor(
                 tenor_query,
                 api_key=self.bot.config.google_api_key,
                 limit=3,
@@ -430,21 +407,18 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             if search_results:
                 return str(random.choice(search_results).url)
             else:
-                print(f"WARN: No Tenor results found for query: {tenor_query}")
+                _logger.warning(f"No Tenor results found for query: {tenor_query}")
 
         # Any engines that use normal search queries are handled below
-        if not self.bot.config.searx_url:
-            print(f"Skipping URL {url} as no Searx instance URL is configured.")
-            return url
-        query = await apis.searching.generate_search_query(
-            "\n".join(msg.content for msg in history_context),
+        query = await searching.generate_search_query(
+            "\n".join(msg.content for msg in ctx.history),
             model=self.bot.config.models.chat,
             ollama_api=self.ollama,
         )
-        print(f"Generated query for URL {url}: {query}")
-        
+        _logger.debug(f"Generated query for URL {url}: {query}")
+
         if parsed_url.host.endswith(("youtube.com", "youtu.be")):
-            search_results = await apis.searching.search_searx(
+            search_results = await searching.search_searx(
                 query,
                 api_url=self.bot.config.searx_url,
                 engines=["youtube"]
@@ -454,10 +428,14 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             return str(search_results[0].url)
 
         # We just search for the query in general search engines
-        search_results = await apis.searching.search_searx(query, api_url=self.bot.config.searx_url)
-        if not search_results:
-            raise ValueError(f"No search results found for query: {query}")
-        return str(search_results[0].url)
+        if self.bot.config.searx_url:
+            search_results = await searching.search_searx(query, api_url=self.bot.config.searx_url)
+            if not search_results:
+                raise ValueError(f"No search results found for query: {query}")
+            return str(search_results[0].url)
+        
+        _logger.debug(f"Skipping URL {url} as it went unhandled.")
+        return None
 
 
 async def setup(bot: LLMBot) -> None:

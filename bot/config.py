@@ -1,9 +1,13 @@
 import datetime
 import json
+import logging
+import random
 from pathlib import Path
 from typing import Annotated
 
 import pydantic
+
+_logger = logging.getLogger(__name__)
 
 class ConfigError(ValueError):
     """Custom exception for configuration-related errors."""
@@ -51,10 +55,15 @@ class ChannelConfig(BaseConfigModel):
 
     checkup_interval: IntTimeDelta = datetime.timedelta(minutes=5)
     checkup_variance: IntTimeDelta = datetime.timedelta(minutes=2)
-    use_ai_user: bool = True # TODO: Rework this entire system. It is far too nuanced to be a single boolean.
 
-    history: int = 50
-    history_when_responding: int = 10
+    def random_interval(self) -> datetime.timedelta:
+        variance: float = self.checkup_variance.total_seconds()
+        return self.checkup_interval + datetime.timedelta(seconds=random.uniform(-variance, variance))
+
+    talk_as_bot: bool = True # TODO: Rework this entire system. It is far too nuanced to be a single boolean.
+
+    history: pydantic.PositiveInt = 50
+    history_when_responding: pydantic.PositiveInt = 10
     @property
     def max_history(self) -> int:
         """Maximum history to keep in memory."""
@@ -114,10 +123,10 @@ class BotConfig(BaseConfigModel):
                 f"Configuration file at {file_path} is invalid: {error}"
             ) from error
 
-        # CHeck if the config changed compared to the raw json loaded
+        # Check if the config changed compared to the raw json loaded
         config_dumped = config.model_dump(mode="json")
         if config_dumped != config_raw:
             safe_write(file_path, config.model_dump_json(indent=4))
-            print("WARNING: An updated configuration file has been saved with default values for missing fields.")
+            _logger.warning("An updated configuration file has been saved with default values for missing fields.")
 
         return config
