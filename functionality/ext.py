@@ -227,7 +227,11 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         _logger.debug(f"Working prompt for channel #{channel.name}:\n{prompt}")
 
-        response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
+        if ctx.config.typing_indicator:
+            async with ctx.channel.typing():
+                response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
+        else:
+            response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
 
         _logger.debug(f"Sending message in #{channel.name}:\n{response_content}")
 

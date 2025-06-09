@@ -61,6 +61,7 @@ class ChannelConfig(BaseConfigModel):
         return self.checkup_interval + datetime.timedelta(seconds=random.uniform(-variance, variance))
 
     talk_as_bot: bool = True # TODO: Rework this entire system. It is far too nuanced to be a single boolean.
+    typing_indicator: bool = True
 
     history: pydantic.PositiveInt = 50
     history_when_responding: pydantic.PositiveInt = 20
