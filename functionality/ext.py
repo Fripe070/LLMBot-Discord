@@ -165,19 +165,19 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 maxlen=channel_config.history_when_responding,
             )
             for msg in reversed(self.channel_histories[message.channel.id]):
-                if msg.id < message.id and len(history) < channel_config.history_when_responding:
+                if msg.id < message.id and len(history) < channel_config.history_when_responding - 1:
                     history.appendleft(msg)
             if len(history) < channel_config.history_when_responding:
                 # Fill out the rest with a fetch
                 async for msg in message.channel.history(
                     before=history[0],
-                    limit=channel_config.history_when_responding - len(history),
+                    limit=channel_config.history_when_responding - len(history) - 1,
                 ):
                     history.appendleft(msg)
+            history.append(message)
 
-            assert all(msg.id <= message.id for msg in history) and history[-1].id == message.id, (
-                "Latest message in history should be the one that triggered the checkup."
-            )
+            assert all(msg.id <= message.id for msg in history), "History contains messages newer than the triggering message."
+            assert history[-1].id == message.id, "Latest message in history is not the triggering message."
 
             await self.channel_checkup(
                 channel=message.channel,
@@ -301,12 +301,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         raise RuntimeError(f"Failed to generate a valid response after {MAX_GENERATION_RETRIES} attempts.")
 
-    async def process_incoming(
-        self,
-        message: discord.Message,
-        *,
-        ctx: CheckupContext,
-    ) -> str:
+    async def process_incoming(self, message: discord.Message, *, ctx: CheckupContext) -> str:
         # TODO: Surface more message data (e.g. attachments, embeds, images)
         content = message.content.strip()
         assert message.guild is not None, "Message must be in a guild"
@@ -322,12 +317,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         return content
 
-    async def process_outgoing(
-        self,
-        content: str,
-        *,
-        ctx: CheckupContext,
-    ) -> str | None:
+    async def process_outgoing(self, content: str, *, ctx: CheckupContext) -> str | None:
         # TODO: *Technically* we should have a check for if the content is in a codeblock
 
         # Almost guaranteed to be an invalid response
@@ -380,12 +370,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         return content
 
-    async def process_url(
-        self,
-        url: str,
-        *,
-        ctx: CheckupContext,
-    ) -> str | None:
+    async def process_url(self, url: str, *, ctx: CheckupContext) -> str | None:
         try:
             parsed_url: URL = URL(url)
         except ValueError:
