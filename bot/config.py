@@ -63,7 +63,7 @@ class ChannelConfig(BaseConfigModel):
     talk_as_bot: bool = True # TODO: Rework this entire system. It is far too nuanced to be a single boolean.
 
     history: pydantic.PositiveInt = 50
-    history_when_responding: pydantic.PositiveInt = 10
+    history_when_responding: pydantic.PositiveInt = 20
     @property
     def max_history(self) -> int:
         """Maximum history to keep in memory."""
