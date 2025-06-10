@@ -2,6 +2,7 @@ import asyncio
 import io
 import re
 import logging
+import time
 
 import discord
 
@@ -33,22 +34,30 @@ async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> 
     # TODO: Embeds
     # TODO: Polls
     # TODO: Audio (files and voice messages)
-    processed_attachments: list[str | None | BaseException] = await asyncio.gather(
-        *(process_attachment(attachment, ctx=ctx) for attachment in message.attachments),
-        return_exceptions=True,
-    )
+    attachment_start_time = time.process_time()
     content = content.rstrip() + " "
-    for attachment, caption_text in zip(message.attachments, processed_attachments):
-        if isinstance(caption_text, BaseException):
-            _logger.error(f"Error processing attachment {attachment.filename}: {caption_text!r}")
+    for attachment in message.attachments:
+        try:
+            processed_caption = await process_attachment(attachment, ctx=ctx)
+        except Exception as error:
+            _logger.error(
+                f"Error processing attachment {attachment.filename!r} {attachment.url!r}: {error!r}",
+                exc_info=error,
+            )
             continue
-        if caption_text is None:
+        if processed_caption is None:
             _logger.debug(f"Attachment {attachment.filename} could not be processed. Skipping.")
             continue
-        _logger.debug(f"Processed attachment {attachment.filename}:\n{caption_text!r}")
-        content += caption_text + " "
+        _logger.debug(f"Processed attachment {attachment.filename!r} {attachment.url}:\n{processed_caption!r}")
+        content += processed_caption + " "
     content = content.strip()
-    
+    if message.attachments:
+        attachment_duration = time.process_time() - attachment_start_time
+        _logger.debug(
+            f"Processed {len(message.attachments)} attachments in {attachment_duration:.2f} seconds. "
+            f"{attachment_duration / len(message.attachments):.2f} seconds per attachment."
+        )
+
     return content
 
 async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupContext) -> str | None:

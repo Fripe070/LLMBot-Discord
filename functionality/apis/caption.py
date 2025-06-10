@@ -67,7 +67,7 @@ async def generate_image_caption(
     loop = asyncio.get_running_loop()
     processed = await loop.run_in_executor(None, _process_image, image)
 
-    res = await ollama_client.generate(
+    result = await ollama_client.generate(
         model=model,
         prompt=prompt,
         images=[ollama_api.Image(value=processed)],
@@ -76,4 +76,4 @@ async def generate_image_caption(
             num_predict=150,
         ),
     )
-    return res.response.strip()
+    return result.response.strip()
