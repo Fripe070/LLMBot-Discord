@@ -3,6 +3,7 @@ import collections
 import dataclasses
 import datetime
 import logging
+import math
 import random
 import re
 import time
@@ -327,6 +328,13 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         # Almost guaranteed to be an invalid response
         if re.search(r"[msgid:[0-9]+]", content):
             _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
+            return None
+
+        character_counts = collections.Counter(content)
+        frequencies = ((c / len(content)) for c in character_counts.values())
+        entropy = -sum(freq * math.log(freq, 2) for freq in frequencies)
+        if entropy > 5:
+            _logger.debug(f"Content has too high entropy: {entropy:.2f}. Skipping processing.")
             return None
 
         # Replace emotes with their Discord representation
