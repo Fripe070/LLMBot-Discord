@@ -26,7 +26,7 @@ type MessageID = DiscordSnowflake
 
 _logger = logging.getLogger(__name__)
 
-MAX_GENERATION_RETRIES: int = 15
+MAX_GENERATION_RETRIES: int = 25
 
 @dataclasses.dataclass(kw_only=True)
 class CheckupContext:
