@@ -1,40 +1,24 @@
 import asyncio
 import collections
-import dataclasses
 import datetime
 import logging
-import math
 import random
-import re
 import time
 from collections.abc import Sequence
 
 import discord
 import ollama as ollama_api
 from discord.ext import commands
-from yarl import URL
 
 from bot.bot import LLMBot
 from bot.config import DUMMY_SNOWFLAKE, ConfigError, ChannelConfig
-from .apis import llm, searching
-from .util.formatting import chop_string, URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
-
-type DiscordSnowflake = int
-type ChannelID = DiscordSnowflake
-type MessageID = DiscordSnowflake
-
+from .defs import APISet, ChannelID, CheckupContext, MAX_GENERATION_RETRIES
+from .inbound import process_incoming
+from .outbound import process_outgoing
+from ..apis import llm
+from ..util.formatting import chop_string
 
 _logger = logging.getLogger(__name__)
-
-MAX_GENERATION_RETRIES: int = 25
-
-@dataclasses.dataclass(kw_only=True)
-class CheckupContext:
-    config: ChannelConfig
-    channel: discord.TextChannel
-    history: Sequence[discord.Message]
-    author_indexes: dict[DiscordSnowflake, int] = dataclasses.field(default_factory=dict)
-    is_response_to_latest: bool
 
 
 class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
@@ -43,7 +27,9 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         self.bg_task: asyncio.Task | None = None
         self.is_cog_ready: bool = False
 
-        self.ollama = ollama_api.AsyncClient(host=bot.config.ollama_url)
+        self.apis = APISet(
+            ollama=ollama_api.AsyncClient(host=bot.config.ollama_url),
+        )
 
         self.schedule: dict[discord.TextChannel, datetime.datetime] = {}
         self.channel_histories: dict[ChannelID, collections.deque[discord.Message]] = {}
@@ -70,8 +56,8 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             self.bg_task.cancel()
 
     async def background_runner(self) -> None:
-        await llm.ensure_downloaded(self.bot.config.models.text, client=self.ollama)
-        await llm.ensure_downloaded(self.bot.config.models.chat, client=self.ollama)
+        await llm.ensure_downloaded(self.bot.config.models.text, ollama_client=self.apis.ollama)
+        await llm.ensure_downloaded(self.bot.config.models.chat, ollama_client=self.apis.ollama)
 
         await self.bot.wait_until_ready()
 
@@ -193,13 +179,14 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         history: Sequence[discord.Message],
         is_response_to_latest: bool = False,
     ) -> None:
-        assert all(
-            msg1.id < msg2.id
-            for msg1, msg2 in zip(history, tuple(history)[1:])
-        ), "History messages are out of order. Later messages should have higher IDs than earlier ones."
+        assert all(msg1.id < msg2.id for msg1, msg2 in zip(history, tuple(history)[1:])), (
+            "History messages are out of order. Later messages should have higher IDs than earlier ones."
+        )
 
         ctx = CheckupContext(
-            config=self.bot.config.channels[channel.id],
+            config=self.bot.config,
+            channel_config=self.bot.config.channels[channel.id],
+            apis=self.apis,
             channel=channel,
             history=history,
             is_response_to_latest=is_response_to_latest,
@@ -213,11 +200,27 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             emojis = " ".join(f":{emoji.name}:" for emoji in channel.guild.emojis)
             prompt += f"Chatroom emotes: {emojis}\n"
 
-        prompt += "\n" + "\n".join(await self.gather_prompt_history(ctx)) + "\n"
+        prompt_history: Sequence[str] = await self.gather_prompt_history(ctx)
+        prompt += "\n" + "\n".join(prompt_history) + "\n"
+
+        appropriate_history_length = (
+            ctx.channel_config.history_when_responding
+            if is_response_to_latest
+            else ctx.channel_config.max_history
+        )
+        assert len(prompt_history) == len(history), (
+            f"Prompt history length {len(prompt_history)} does not match history length {len(history)}."
+        )
+        assert len(prompt_history) <= appropriate_history_length, (
+            f"History length {len(history)} exceeds the maximum allowed length of {appropriate_history_length}."
+        )
+        assert len(prompt_history) == appropriate_history_length, (
+            f"History length does not match the expected length. {len(prompt_history)} != {appropriate_history_length}. "
+        )
 
         assert self.bot.user is not None, "Bot user is not set."
         prompt += f"[msgid:{len(history)}] User #"
-        if ctx.config.talk_as_bot or not ctx.author_indexes.values():
+        if ctx.channel_config.talk_as_bot or not ctx.author_indexes.values():
             prompt += str(ctx.author_indexes.setdefault(self.bot.user.id, len(ctx.author_indexes)))
         else:
             # TODO: Attempt to have the LLM predict the author rather than using a random one
@@ -228,7 +231,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         _logger.debug(f"Working prompt for channel #{channel.name}:\n{prompt}")
 
-        if ctx.config.typing_indicator:
+        if ctx.channel_config.typing_indicator:
             async with ctx.channel.typing():
                 response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
         else:
@@ -260,15 +263,15 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                         working_string += f" (replying to [msgid:{i}])"
                         break
             working_string += ": "
-            working_string += await self.process_incoming(message, ctx=ctx)
+            working_string += await process_incoming(message, ctx=ctx)
             processed_history.append(working_string)
         return processed_history
 
     async def generate_response(self, prompt: str, *, ctx: CheckupContext) -> tuple[str, discord.Message | None]:
         # We simply retry until we get a valid response from the LLM. It can be finicky sometimes.
         for attempt_index in range(MAX_GENERATION_RETRIES):
-            result = await self.ollama.generate(
-                model=self.bot.config.models.text,
+            result = await ctx.apis.ollama.generate(
+                model=ctx.config.models.text,
                 prompt=prompt,
                 options=ollama_api.Options(
                     stop=["\n[msgid:"],
@@ -298,156 +301,13 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                         _logger.debug(f"Reply index {replying_to_index} out of bounds for history length {len(ctx.history)}. Skipping this response.")
                         continue
 
-            content = await self.process_outgoing(content, ctx=ctx)
+            content = await process_outgoing(content, ctx=ctx)
             if content is None:
                 _logger.debug(f"Processed content is None for response: {result.response!r}. Skipping this response.")
                 continue
             return content, ctx.history[replying_to_index] if replying_to_index is not None else None
 
         raise RuntimeError(f"Failed to generate a valid response after {MAX_GENERATION_RETRIES} attempts.")
-
-    async def process_incoming(self, message: discord.Message, *, ctx: CheckupContext) -> str:
-        # TODO: Surface more message data (e.g. attachments, embeds, images)
-        content = message.content.strip()
-        assert message.guild is not None, "Message must be in a guild"
-
-        emoji_map = {str(emoji): f":{emoji.name}:" for emoji in message.guild.emojis}
-        for emoji_str, emoji_rep in emoji_map.items():
-            content = content.replace(emoji_str, emoji_rep)
-
-        # Replace mentions with their index in the author_indexes
-        for match_full, match_snowflake in re.findall(r"(<@!?([0-9]+)>)", content):
-            mapped_snowflake = ctx.author_indexes.setdefault(int(match_snowflake), len(ctx.author_indexes))
-            content = content.replace(match_full, f"@{mapped_snowflake}")
-
-        # TODO: Image caption
-        
-        # TODO: Embed summary
-        
-        # TODO: Polls
-        
-        # TODO: Text file attachments
-
-        return content
-
-    async def process_outgoing(self, content: str, *, ctx: CheckupContext) -> str | None:
-        # TODO: *Technically* we should have a check for if the content is in a codeblock
-
-        # Almost guaranteed to be an invalid response
-        if re.search(r"[msgid:[0-9]+]", content):
-            _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
-            return None
-
-        character_counts = collections.Counter(content)
-        frequencies = ((c / len(content)) for c in character_counts.values())
-        entropy = -sum(freq * math.log(freq, 2) for freq in frequencies)
-        if entropy > 5:
-            _logger.debug(f"Content has too high entropy: {entropy:.2f}. Skipping processing.")
-            return None
-
-        # Replace emotes with their Discord representation
-        emoji_map = {f":{emoji.name}:": emoji for emoji in ctx.channel.guild.emojis}
-        for emoji_str, emoji in emoji_map.items():
-            content = content.replace(emoji_str, str(emoji))
-
-        inverse_author_indexes = {v: k for k, v in ctx.author_indexes.items()}
-        for match_full, match_index in (
-            *re.findall(r"(@([0-9]+)\b)", content),
-            *re.findall(r"(\bUser ?([0-9]+)\b)", content, flags=re.IGNORECASE),
-        ):
-            match_index_int = int(match_index)
-            if 0 <= match_index_int >= len(inverse_author_indexes):
-                _logger.debug(f"Invalid author index {match_index_int} in content: {content!r}. Skipping processing.")
-                return None
-            mapped_snowflake = inverse_author_indexes.get(match_index_int, None)
-            if mapped_snowflake is None:
-                _logger.debug(f"Author index {match_index_int} not found in author indexes: {ctx.author_indexes}. Skipping processing.")
-                return None
-            content = content.replace(match_full, f"<@{mapped_snowflake}>")
-
-        links: list[re.Match[str]] = [
-            *re.finditer(URL_REGEX, content),
-            *re.finditer(URL_REGEX_NO_EMBED, content),
-            *re.finditer(URL_LINK_REGEX, content),
-        ]
-        urls: set[str] = {match["url"] for match in links}
-        processed_urls: list[str | None | BaseException] = await asyncio.gather(
-            *(self.process_url(url, ctx=ctx) for url in urls),
-            return_exceptions=True,
-        )
-        for original_url, processed_url in zip(urls, processed_urls):
-            if processed_url is None:
-                _logger.debug(f"URL {original_url} could not be processed. Skipping.")
-                continue
-            if not isinstance(processed_url, str):
-                _logger.debug(f"Error processing URL {original_url}: {processed_url!r}")
-                continue
-            _logger.debug(f"{original_url} -> {processed_url}")
-            content = content.replace(original_url, processed_url)
-
-        # TODO: Images
-
-
-        return content
-
-    async def process_url(self, url: str, *, ctx: CheckupContext) -> str | None:
-        try:
-            parsed_url: URL = URL(url)
-        except ValueError:
-            return None
-        if parsed_url.scheme not in {"http", "https"}:
-            return None
-        if not parsed_url.host:
-            return None
-
-        if self.bot.config.google_api_key and (
-            parsed_url.host.endswith(("tenor.com", "giphy.com"))
-            or parsed_url.suffix in {".gif", ".webp"}
-        ):
-            tenor_query = await searching.generate_search_query(
-                "\n".join(msg.content for msg in ctx.history),
-                prompt=searching.GIF_PROMPT,
-                model=self.bot.config.models.chat,
-                ollama_api=self.ollama,
-            )
-            _logger.debug(f"Searching Tenor for: {tenor_query}")
-            search_results = await searching.search_tenor(
-                tenor_query,
-                api_key=self.bot.config.google_api_key,
-                limit=3,
-            )
-            if search_results:
-                return str(random.choice(search_results).url)
-            else:
-                _logger.warning(f"No Tenor results found for query: {tenor_query}")
-
-        # Any engines that use normal search queries are handled below
-        query = await searching.generate_search_query(
-            "\n".join(msg.content for msg in ctx.history),
-            model=self.bot.config.models.chat,
-            ollama_api=self.ollama,
-        )
-        _logger.debug(f"Generated query for URL {url}: {query}")
-
-        if parsed_url.host.endswith(("youtube.com", "youtu.be")):
-            search_results = await searching.search_searx(
-                query,
-                api_url=self.bot.config.searx_url,
-                engines=["youtube"]
-            )
-            if not search_results:
-                raise ValueError(f"No YouTube results found for query: {query}")
-            return str(search_results[0].url)
-
-        # We just search for the query in general search engines
-        if self.bot.config.searx_url:
-            search_results = await searching.search_searx(query, api_url=self.bot.config.searx_url)
-            if not search_results:
-                raise ValueError(f"No search results found for query: {query}")
-            return str(search_results[0].url)
-
-        _logger.debug(f"Skipping URL {url} as it went unhandled.")
-        return None
 
 
 async def setup(bot: LLMBot) -> None:

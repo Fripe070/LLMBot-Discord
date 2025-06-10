@@ -1,11 +1,10 @@
-import json
 from dataclasses import dataclass
 from enum import Enum
 
-import ollama
+import aiohttp
+import ollama as ollama_api
 from pydantic import BaseModel, ValidationError
 from yarl import URL
-import aiohttp
 
 GENERIC_PROMPT = (
     "Based on the above message history, I want to share a relevant link. "
@@ -36,14 +35,14 @@ async def generate_search_query(
     ctx: str,
     *,
     model: str,
-    ollama_api: ollama.AsyncClient = ollama.AsyncClient(),
+    ollama_client: ollama_api.AsyncClient,
     prompt: str = GENERIC_PROMPT,
     max_retries: int = 3,
 ) -> str:
     for _ in range(max_retries):
-        result = await ollama_api.chat(
+        result = await ollama_client.chat(
             model=model,
-            messages=[ollama.Message(role="user", content=f"{ctx}\n\n" + prompt)],
+            messages=[ollama_api.Message(role="user", content=f"{ctx}\n\n" + prompt)],
             format=ResponseFormat.model_json_schema(),
         )
         try:

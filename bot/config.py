@@ -61,7 +61,6 @@ class ChannelConfig(BaseConfigModel):
         return self.checkup_interval + datetime.timedelta(seconds=random.uniform(-variance, variance))
 
     talk_as_bot: bool = True # TODO: Rework this entire system. It is far too nuanced to be a single boolean.
-    ignore_self: bool = False
     typing_indicator: bool = True
 
     history: pydantic.PositiveInt = 50
@@ -89,6 +88,7 @@ class BotConfig(BaseConfigModel):
         text: str = "llama3.1:8b-text-q4_K_M"
         chat: str = "llama3.1:8b-instruct-q4_K_M"
     models: ModelConfig = ModelConfig()
+    max_attachment_size_mb: pydantic.PositiveInt = 20
 
     channels: Annotated[
         dict[Snowflake, ChannelConfig],

@@ -1,54 +1,79 @@
-import logging
-import base64
 import asyncio
 import io
+import logging
+
+import ollama as ollama_api
 from PIL import Image
 
-import aiohttp
-import ollama as ollama_api
+from .llm import generify_model_name
 
-__all__ = ("generate_image_caption",)
+__all__ = ("generate_image_caption", "supports_vision")
 
 _logger = logging.getLogger(__name__)
 
+IMAGE_CAPTION_PROMPT = (
+    "Describe this image in detail but in a single line. "
+    "Only include the image description and any text that appears within the image in your response."
+)
 
-def resize_img(image_data: bytes, max_size: tuple[int, int] = (896, 896)) -> bytes:
-    img = Image.open(io.BytesIO(image_data))
+_vision_capabilities: dict[str, bool] = {}
 
-    ratio = min(max_size[0] / img.width, max_size[1] / img.height)
-    resized_img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.Resampling.LANCZOS)
+async def supports_vision(model: str, ollama_client: ollama_api.AsyncClient) -> bool:
+    model_name = generify_model_name(model)
+    if model_name not in _vision_capabilities:
+        model_info = await ollama_client.show(model)
+        _vision_capabilities[model_name] = "vision" in (model_info.capabilities or [])
+    return _vision_capabilities[model_name]
 
-    padded_img = Image.new("RGBA", max_size, (0, 0, 0, 0))
-    padded_img.paste(resized_img, ((max_size[0] - resized_img.width) // 2, (max_size[1] - resized_img.height) // 2))
 
+def resize_within(
+    image: Image.Image,
+    *,
+    box: tuple[int, int] = (896, 896),
+    background: tuple[float, float ,float, float] = (0, 0, 0, 0),
+) -> Image.Image:
+    result = Image.new("RGBA", box, background)
+    
+    ratio: float = min(box[0] / image.width, box[1] / image.height)
+    resized_img = image.resize((int(image.width * ratio), int(image.height * ratio)), Image.Resampling.LANCZOS)
+
+    result.paste(resized_img, ((box[0] - resized_img.width) // 2, (box[1] - resized_img.height) // 2))
+    return result
+
+
+def _process_image(img: Image.Image | io.BytesIO) -> bytes:
+    if isinstance(img, io.BytesIO):
+        img = Image.open(img)
     output = io.BytesIO()
-    padded_img.save(output, format="PNG")
+    resize_within(img).save(output, format="PNG")
     return output.getvalue()
 
 
 async def generate_image_caption(
-    img_url: str,
+    image: bytes | io.BytesIO | Image.Image,
     *,
-    model: str = "gemma3:4b-it-qat",
-    client: ollama_api.AsyncClient = ollama_api.AsyncClient(),
+    model: str,
+    ollama_client: ollama_api.AsyncClient,
+    prompt: str = IMAGE_CAPTION_PROMPT,
 ) -> str:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(img_url) as res:
-                res.raise_for_status()
-                img_bytes = await res.read()
+    if not await supports_vision(model, ollama_client):
+        raise ValueError(f"Model {model} does not support vision capabilities.")
 
-        img_b64 = base64.b64encode(await asyncio.to_thread(resize_img, img_bytes)).decode("utf-8")
-        res = await client.generate(
-            model=model,
-            prompt="Describe this image in a short sentence, only include the description and text within the image in response",
-            images=[img_b64],
-            options=ollama_api.Options(
-                num_predict=150,
-            ),
-        )
-        return res.response.strip()
+    if isinstance(image, bytes):
+        image = io.BytesIO(image)
+    if not isinstance(image, (io.BytesIO, Image.Image)):
+        raise ValueError("Input must be a bytes, BytesIO, or a PIL Image object.")
 
-    except Exception as e:
-        _logger.error(f"Error generating image caption: {e}")
-        raise
+    loop = asyncio.get_running_loop()
+    processed = await loop.run_in_executor(None, _process_image, image)
+
+    res = await ollama_client.generate(
+        model=model,
+        prompt=prompt,
+        images=[ollama_api.Image(value=processed)],
+        options=ollama_api.Options(
+            stop=["\n"],
+            num_predict=150,
+        ),
+    )
+    return res.response.strip()
