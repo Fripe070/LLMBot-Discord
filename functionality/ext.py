@@ -217,7 +217,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         assert self.bot.user is not None, "Bot user is not set."
         prompt += f"[msgid:{len(history)}] User #"
-        if ctx.config.talk_as_bot:
+        if ctx.config.talk_as_bot or not ctx.author_indexes.values():
             prompt += str(ctx.author_indexes.setdefault(self.bot.user.id, len(ctx.author_indexes)))
         else:
             # TODO: Attempt to have the LLM predict the author rather than using a random one
@@ -319,6 +319,14 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         for match_full, match_snowflake in re.findall(r"(<@!?([0-9]+)>)", content):
             mapped_snowflake = ctx.author_indexes.setdefault(int(match_snowflake), len(ctx.author_indexes))
             content = content.replace(match_full, f"@{mapped_snowflake}")
+
+        # TODO: Image caption
+        
+        # TODO: Embed summary
+        
+        # TODO: Polls
+        
+        # TODO: Text file attachments
 
         return content
 
