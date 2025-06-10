@@ -78,7 +78,7 @@ class ChannelConfig(BaseConfigModel):
 
 class BotConfig(BaseConfigModel):
     token: str = "<bot token goes here>"
-    prefix: str = "ai!"
+    prefix: str | list[str] = "ai!"
 
     google_api_key: str = "<google api key goes here>"
     ollama_url: str = "http://localhost:11434"

@@ -16,11 +16,11 @@ _logger = logging.getLogger(__name__)
 
 class LLMBot(commands.Bot):
     def __init__(self) -> None:
+        self.config: BotConfig = BotConfig()  # Default config, will be populated upon bot startup
         super().__init__(
-            command_prefix=["ai!"], 
+            command_prefix=self.config.prefix,
             intents=discord.Intents.all(),
         )
-        self.config: BotConfig = BotConfig()  # Default config, will be populated upon bot startup
 
     async def setup_hook(self) -> None:
         await self.load_extension("functionality.ext") # Core functionality
@@ -39,6 +39,7 @@ class LLMBot(commands.Bot):
         sys.excepthook = handle_exception
         
         self.config = BotConfig.load(Path(config_path))
+        self.command_prefix = self.config.prefix
 
         async def runner():
             async with self:
