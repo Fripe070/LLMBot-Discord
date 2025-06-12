@@ -188,7 +188,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             channel_config=self.bot.config.channels[channel.id],
             apis=self.apis,
             channel=channel,
-            history=history,
+            history=tuple(history),
             is_response_to_latest=is_response_to_latest,
         )
 
