@@ -79,7 +79,6 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
     # TODO: Send polls
     # TODO: React to messages
 
-    print(ctx.previously_sent_cache, tuple(ctx.previously_sent_cache))
     # Check if content is too similar to a previously sent response
     similar_enough: int = 0
     for cached in ctx.previously_sent_cache:
