@@ -5,6 +5,7 @@ import math
 import random
 import re
 
+from rapidfuzz import fuzz
 from yarl import URL
 
 from .defs import CheckupContext
@@ -39,8 +40,8 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
 
     inverse_author_indexes = {v: k for k, v in ctx.author_indexes.items()}
     for match_full, match_index in (
-        *re.findall(r"(@([0-9]+)\b)", content),
-        *re.findall(r"(\bUser ?([0-9]+)\b)", content, flags=re.IGNORECASE),
+        *re.findall(r"(@#?([0-9]+)\b)", content),
+        *re.findall(r"(\bUser ?#?([0-9]+)\b)", content, flags=re.IGNORECASE),
     ):
         match_index_int = int(match_index)
         if 0 <= match_index_int >= len(inverse_author_indexes):
@@ -78,6 +79,16 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
     # TODO: Send polls
     # TODO: React to messages
 
+    print(ctx.previously_sent_cache, tuple(ctx.previously_sent_cache))
+    # Check if content is too similar to a previously sent response
+    similar_enough: int = 0
+    for cached in ctx.previously_sent_cache:
+        if fuzz.ratio(content, cached) / 100 >= ctx.channel_config.repeat_prevention.threshold:
+            similar_enough += 1
+    if similar_enough >= ctx.channel_config.repeat_prevention.max_messages:
+        _logger.debug(f"Response content is too similar to previously sent content. Skipping this response.")
+        return None
+        
     return content
 
 

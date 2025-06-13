@@ -63,17 +63,25 @@ class ChannelConfig(BaseConfigModel):
     talk_as_bot: bool = True # TODO: Rework this entire system. It is far too nuanced to be a single boolean.
     typing_indicator: bool = True
 
-    history: pydantic.PositiveInt = 50
-    history_when_responding: pydantic.PositiveInt = 20
-    @property
-    def max_history(self) -> int:
-        """Maximum history to keep in memory."""
-        return max(self.history, self.history_when_responding)
+    class History(BaseConfigModel):
+        limit: pydantic.PositiveInt = 50
+        limit_responding: pydantic.PositiveInt = 20
+        @property
+        def max(self) -> int:
+            """Maximum history to keep in memory."""
+            return max(self.limit, self.limit_responding)
+    history: History = History()
 
     class ActivityLimit(BaseConfigModel):
         window_size: int = 20
         max_bot_messages: int = 3
     activity_limit: ActivityLimit = ActivityLimit()
+    
+    class SimilarityLimits(BaseConfigModel):
+        window_size: int = 5
+        max_messages: int = 1
+        threshold: float = 0.7
+    repeat_prevention: SimilarityLimits = SimilarityLimits()
 
 
 class BotConfig(BaseConfigModel):

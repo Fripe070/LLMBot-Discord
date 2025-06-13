@@ -1,3 +1,4 @@
+import collections
 import dataclasses
 from collections.abc import Sequence
 
@@ -24,5 +25,6 @@ class CheckupContext:
     channel: discord.TextChannel
     history: Sequence[discord.Message]
     author_indexes: dict[DiscordSnowflake, int] = dataclasses.field(default_factory=dict)
+    previously_sent_cache: collections.deque[str]
     is_response_to_latest: bool
     
