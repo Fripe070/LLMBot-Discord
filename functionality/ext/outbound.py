@@ -12,7 +12,6 @@ from .defs import CheckupContext
 from ..apis import searching
 from ..util.formatting import URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
 
-
 __all__ = (
     "process_outgoing",
 )
@@ -25,7 +24,7 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
     if re.search(r"[msgid:[0-9]+]", content):
         _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
         return None
-    
+
     if "<file type=unknown>" in content:
         _logger.debug("Content contains unknown file type tag. Skipping processing.")
         return None
@@ -91,7 +90,14 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
     if similar_enough >= ctx.channel_config.repeat_prevention.max_messages:
         _logger.debug(f"Response content is too similar to previously sent content. Skipping this response.")
         return None
-        
+
+    # It LOVES sending incrementing numbers.
+    def is_num(string: str) -> bool:
+        return all(c in "0123456789" for c in string if c not in "\\`*_[]()<>~ \n")
+    if is_num(content) and any(is_num(cached) for cached in ctx.previously_sent_cache):
+        _logger.debug(f"Response content is a number and similar to previously sent content. Skipping this response.")
+        return None
+
     return content
 
 async def process_url(url: str, *, ctx: CheckupContext) -> str | None:
