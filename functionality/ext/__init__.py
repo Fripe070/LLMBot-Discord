@@ -20,6 +20,7 @@ from ..util.formatting import chop_string
 
 _logger = logging.getLogger(__name__)
 
+CACHED_RESPONSES_MAX_LENGTH: int = 5
 
 class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
     def __init__(self, bot: LLMBot) -> None:
@@ -33,6 +34,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         self.schedule: dict[discord.TextChannel, datetime.datetime] = {}
         self.channel_histories: dict[ChannelID, collections.deque[discord.Message]] = {}
+        self.channel_responses_sent: dict[ChannelID, collections.deque[str]] = {}
 
         for channel in self.bot.config.channels.values():
             if channel.channel_id == DUMMY_SNOWFLAKE:
@@ -73,9 +75,9 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                     "Please check your configuration."
                 )
             self.schedule[channel_obj] = datetime.datetime.now() # ASAP
-            self.channel_histories[channel_obj.id] = collections.deque(maxlen=channel_config.max_history)
-            _logger.debug(f"Initialising channel history for #{channel_obj.name} with {channel_config.max_history} messages.")
-            async for msg in channel_obj.history(before=datetime.datetime.now(), limit=channel_config.max_history):
+            self.channel_histories[channel_obj.id] = collections.deque(maxlen=channel_config.history.max)
+            _logger.debug(f"Initialising channel history for #{channel_obj.name} with {channel_config.history.max} messages.")
+            async for msg in channel_obj.history(before=datetime.datetime.now(), limit=channel_config.history.max):
                 self.channel_histories[channel_obj.id].appendleft(msg)
 
         self.is_cog_ready = True
@@ -98,7 +100,9 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 continue
             channel_config = self.bot.config.channels[channel_obj.id]
 
-            history: Sequence[discord.Message] = self.channel_histories[channel_obj.id]
+            history: Sequence[discord.Message] = tuple(
+                self.channel_histories[channel_obj.id]
+            )[-channel_config.history.limit:]
             if len(history) <= 0:
                 _logger.debug(f"No messages in channel {channel_obj.name} to process. Skipping checkup.")
                 continue
@@ -149,16 +153,16 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             channel_config = self.bot.config.channels[message.channel.id]
 
             history: collections.deque[discord.Message] = collections.deque(
-                maxlen=channel_config.history_when_responding,
+                maxlen=channel_config.history.limit_responding,
             )
             for msg in reversed(self.channel_histories[message.channel.id]):
-                if msg.id < message.id and len(history) < channel_config.history_when_responding - 1:
+                if msg.id < message.id and len(history) < channel_config.history.limit_responding - 1:
                     history.appendleft(msg)
-            if len(history) < channel_config.history_when_responding:
+            if len(history) < channel_config.history.limit_responding:
                 # Fill out the rest with a fetch
                 async for msg in message.channel.history(
                     before=history[0],
-                    limit=channel_config.history_when_responding - len(history) - 1,
+                    limit=channel_config.history.limit_responding - len(history) - 1,
                 ):
                     history.appendleft(msg)
             history.append(message)
@@ -182,13 +186,16 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         assert all(msg1.id < msg2.id for msg1, msg2 in zip(history, tuple(history)[1:])), (
             "History messages are out of order. Later messages should have higher IDs than earlier ones."
         )
-
+        
+        channel_config = self.bot.config.channels[channel.id]
         ctx = CheckupContext(
             config=self.bot.config,
-            channel_config=self.bot.config.channels[channel.id],
+            channel_config=channel_config,
             apis=self.apis,
             channel=channel,
             history=tuple(history),
+            previously_sent_cache=self.channel_responses_sent.setdefault(
+                channel.id, collections.deque(maxlen=channel_config.repeat_prevention.window_size)),
             is_response_to_latest=is_response_to_latest,
         )
 
@@ -204,9 +211,9 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         prompt += "\n" + "\n".join(prompt_history) + "\n"
 
         appropriate_history_length = (
-            ctx.channel_config.history_when_responding
+            ctx.channel_config.history.limit_responding
             if is_response_to_latest
-            else ctx.channel_config.max_history
+            else ctx.channel_config.history.limit
         )
         assert len(prompt_history) == len(history), (
             f"Prompt history length {len(prompt_history)} does not match history length {len(history)}."
@@ -238,6 +245,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
 
         _logger.debug(f"Sending message in #{channel.name}:\n{response_content}")
+        ctx.previously_sent_cache.append(response_content)
 
         allowed_mentions = discord.AllowedMentions(replied_user=True, users=True, everyone=False, roles=False)
         # TODO: Do something more intelligent than just chopping the string
