@@ -308,6 +308,10 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                     if replying_to_index < 0 or replying_to_index >= len(ctx.history):
                         _logger.debug(f"Reply index {replying_to_index} out of bounds for history length {len(ctx.history)}. Skipping this response.")
                         continue
+                        
+            if content.strip() in ("", ":"):
+                _logger.debug(f"Empty response from LLM on attempt {attempt_index + 1}. Retrying...")
+                continue
 
             content = await process_outgoing(content, ctx=ctx)
             if content is None:

@@ -61,6 +61,14 @@ async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> 
     return content
 
 async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupContext) -> str | None:
+    def get_attachment_tag(kind: str, cap: str) -> str:
+        return f"<file type={kind}>{cap}</file>"
+    
+    unrecognized_file: str = get_attachment_tag(
+        "unknown", 
+        f'Unsupported attachment type for file "{attachment.filename}"'
+    )
+    
     if attachment.size > ctx.config.max_attachment_size_mb * 1024 * 1024:
         _logger.debug(
             f"Attachment {attachment.filename} is too large ({attachment.size / (1024 * 1024):.2f} MB). "
@@ -83,13 +91,10 @@ async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupCont
             f"Attachment {attachment.filename} has unsupported content type {attachment.content_type!r}. "
             "Skipping processing."
         )
-        return None
+        return unrecognized_file
 
     file = io.BytesIO()
     await attachment.save(file, seek_begin=True)
-
-    def get_attachment_tag(kind: str, cap: str) -> str:
-        return f"<file type={kind}>{cap}</file>"
 
     if matching_ct in image_cts:
         caption_text = await caption.generate_image_caption(
@@ -100,4 +105,5 @@ async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupCont
         tag = get_attachment_tag("image", caption_text)
         return tag
     
-    return get_attachment_tag("unknown", f'Unsupported attachment type for file "{attachment.filename}".')
+    _logger.warning(f'Attachment of type "{attachment.content_type}" was recognized but not supported.')
+    return unrecognized_file
