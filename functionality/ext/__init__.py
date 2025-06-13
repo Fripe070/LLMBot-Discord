@@ -6,6 +6,7 @@ import random
 import time
 from collections.abc import Sequence
 
+import aiohttp
 import discord
 import ollama as ollama_api
 from discord.ext import commands
@@ -28,9 +29,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         self.bg_task: asyncio.Task | None = None
         self.is_cog_ready: bool = False
 
-        self.apis = APISet(
-            ollama=ollama_api.AsyncClient(host=bot.config.ollama_url),
-        )
+        self.apis: APISet | None = None
 
         self.schedule: dict[discord.TextChannel, datetime.datetime] = {}
         self.channel_histories: dict[ChannelID, collections.deque[discord.Message]] = {}
@@ -44,11 +43,16 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 )
 
     async def cog_load(self) -> None:
+        self.apis = APISet(
+            ollama=ollama_api.AsyncClient(host=self.bot.config.ollama_url),
+            session=aiohttp.ClientSession(),
+        )
+        
         def runner_done_callback(task: asyncio.Task[None]) -> None:
             try:
                 task.result()  # Propagate any exceptions raised in the background task
             except asyncio.CancelledError:
-                _logger.debug("Background runner task was cancelled.")
+                _logger.info("Background runner task was cancelled.")
 
         self.bg_task = self.bot.loop.create_task(self.background_runner())
         self.bg_task.add_done_callback(runner_done_callback)
@@ -56,6 +60,8 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
     async def cog_unload(self) -> None:
         if self.bg_task is not None and not self.bg_task.done():
             self.bg_task.cancel()
+        if self.apis is not None and not self.apis.session.closed:
+            await self.apis.session.close()
 
     async def background_runner(self) -> None:
         await llm.ensure_downloaded(self.bot.config.models.text, ollama_client=self.apis.ollama)
@@ -184,6 +190,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         )
         
         channel_config = self.bot.config.channels[channel.id]
+        assert self.apis, "APIs are not initialized. This is likely the result of invalid cog loading."
         ctx = CheckupContext(
             config=self.bot.config,
             channel_config=channel_config,

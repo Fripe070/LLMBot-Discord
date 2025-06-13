@@ -2,6 +2,7 @@ import collections
 import dataclasses
 from collections.abc import Sequence
 
+import aiohttp
 import discord
 import ollama as ollama_api
 
@@ -16,6 +17,7 @@ type MessageID = DiscordSnowflake
 @dataclasses.dataclass(kw_only=True)
 class APISet:
     ollama: ollama_api.AsyncClient
+    session: aiohttp.ClientSession
 
 @dataclasses.dataclass(kw_only=True)
 class CheckupContext:

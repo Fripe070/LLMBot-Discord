@@ -25,6 +25,10 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
     if re.search(r"[msgid:[0-9]+]", content):
         _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
         return None
+    
+    if "<file type=unknown>" in content:
+        _logger.debug("Content contains unknown file type tag. Skipping processing.")
+        return None
 
     character_counts = collections.Counter(content)
     frequencies = ((c / len(content)) for c in character_counts.values())
@@ -41,7 +45,7 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
     inverse_author_indexes = {v: k for k, v in ctx.author_indexes.items()}
     for match_full, match_index in (
         *re.findall(r"(@#?([0-9]+)\b)", content),
-        *re.findall(r"(\bUser ?#?([0-9]+)\b)", content, flags=re.IGNORECASE),
+        *re.findall(r"((?:@|\b)User ?#?([0-9]+)\b)", content, flags=re.IGNORECASE),
     ):
         match_index_int = int(match_index)
         if 0 <= match_index_int >= len(inverse_author_indexes):
@@ -89,7 +93,6 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
         return None
         
     return content
-
 
 async def process_url(url: str, *, ctx: CheckupContext) -> str | None:
     try:

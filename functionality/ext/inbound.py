@@ -1,10 +1,10 @@
-import asyncio
 import io
-import re
 import logging
+import re
 import time
 
 import discord
+from yarl import URL
 
 from .defs import CheckupContext
 
@@ -20,6 +20,9 @@ _logger = logging.getLogger(__name__)
 def get_attachment_tag(kind: str, cap: str) -> str:
     return f"<file type={kind}>{cap}</file>"
 
+def get_embed_tag(kind: str, summary: str) -> str:
+    return f"<embed type={kind}>{summary}</embed>"
+
 async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> str:
     content = message.system_content.strip()
     assert message.guild is not None, "Message must be in a guild"
@@ -33,17 +36,20 @@ async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> 
         mapped_snowflake = ctx.author_indexes.setdefault(int(match_snowflake), len(ctx.author_indexes))
         content = content.replace(match_full, f"@{mapped_snowflake}")
 
-    # TODO: Surface more message data
-    # TODO: Embeds
-    # TODO: Polls
-    # TODO: Audio (files and voice messages)
+    content = await process_media(message, content, ctx=ctx)
+
+    return content
+
+async def process_media(message: discord.Message, content: str, *, ctx: CheckupContext) -> str:
     attachment_start_time = time.process_time()
     content = content.rstrip() + " "
     for attachment in message.attachments:
         try:
             processed_caption = await process_attachment(attachment, ctx=ctx)
         except Exception as error:
-            _logger.warning(f"Error processing attachment {attachment.filename!r} {attachment.url!r}: {error!r}", exc_info=error)
+            _logger.warning(
+                f"Error processing attachment {attachment.filename!r} {attachment.url!r}: {error!r}", exc_info=error
+            )
             continue
         if processed_caption is None:
             _logger.debug(f"Attachment {attachment.filename} could not be processed. Skipping.")
@@ -58,7 +64,64 @@ async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> 
             f"{attachment_duration / len(message.attachments):.2f} seconds per attachment."
         )
 
+    print("embeds:", [embed.to_dict() for embed in message.embeds])
+    print("poll:", message.poll)
+
+    content = content.rstrip() + " "
+    for embed in message.embeds:
+        if embed.type == "image":
+            if not embed.url:
+                _logger.debug(f"Embed {embed} is of type 'image' but has no URL. Skipping processing.")
+                continue
+            img_tag = await process_image(URL(embed.url), ctx=ctx)
+            if img_tag is None:
+                _logger.debug(f"Image embed {embed.url!r} could not be processed. Skipping.")
+                continue
+            if embed.url and embed.url in content:
+                content = content.replace(embed.url, img_tag)
+            else:
+                content += img_tag + " "
+        else:
+            embed_tag = await process_generic_embed(embed, ctx=ctx)
+            if embed_tag is None:
+                _logger.debug(f"Embed {embed} could not be processed. Skipping.")
+                continue
+            if embed.url and embed.url in content:
+                content = content.replace(embed.url, embed_tag)
+            else:
+                content += embed_tag + " "
+    content = content.strip()
+
+    # TODO: Polls
+    # TODO: Audio (files and voice messages)
+
     return content
+
+async def process_generic_embed(embed: discord.Embed, *, ctx: CheckupContext) -> str | None:
+    if embed.type not in {"rich", "article"}:
+        _logger.debug(f"Encountered unsupported embed type {embed.type!r}. Skipping processing.")
+        return None
+
+    summary: str = embed.description or ""
+    if embed.title:
+        if summary:
+            summary = f"# {embed.title}\n{summary}"
+        else:
+            summary = embed.title
+    summary = summary.rstrip()
+    for img in filter(bool, (embed.thumbnail, embed.image)):
+        if not img.url:
+            _logger.debug(f"Embed {embed.url!r} has an image without a URL. Skipping processing.")
+            continue
+        img_tag = await process_image(URL(img.url), ctx=ctx)
+        if img_tag is None:
+            _logger.debug(f"Image in embed {embed.url!r} could not be processed. Skipping.")
+            continue
+        summary += "\n" + img_tag
+    summary = summary.strip()
+
+    return get_embed_tag(embed.type, summary)
+
 
 async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupContext) -> str | None:
     unrecognized_attachment_tag: str = get_attachment_tag(
@@ -94,13 +157,28 @@ async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupCont
     await attachment.save(file, seek_begin=True)
 
     if matching_ct in image_cts:
-        caption_text = await caption.generate_image_caption(
-            file,
-            model=ctx.config.models.chat,
-            ollama_client=ctx.apis.ollama,
-        )
-        tag = get_attachment_tag("image", caption_text)
-        return tag
+        return await process_image(file, ctx=ctx)
 
     _logger.warning(f'Attachment of type "{attachment.content_type}" was recognized but not supported.')
     return unrecognized_attachment_tag
+
+
+async def process_image(image: io.BytesIO | URL, *, ctx: CheckupContext) -> str | None:
+    if isinstance(image, io.BytesIO):
+        file = image
+    elif isinstance(image, URL):
+        async with ctx.apis.session.get(image) as response:
+            if response.status != 200:
+                _logger.warning(f"Failed to fetch image from {image!r}: {response.status} {response.reason}")
+                return None
+            file = io.BytesIO(await response.read())
+    else:
+        raise ValueError(f"Unsupported image type: {type(image)}. Expected io.BytesIO or URL.")
+
+    caption_text = await caption.generate_image_caption(
+        file,
+        model=ctx.config.models.chat,
+        ollama_client=ctx.apis.ollama,
+    )
+    tag = get_attachment_tag("image", caption_text)
+    return tag
