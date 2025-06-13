@@ -101,7 +101,7 @@ async def process_media(message: discord.Message, content: str, *, ctx: CheckupC
         except Exception as error:
             _logger.warning(f"Error processing poll {message.poll!r}: {error!r}", exc_info=error)
         else:
-            content = content.rstrip() + " " + poll_tag
+            content = (content.rstrip() + " " + poll_tag).strip()
 
     return content
 
