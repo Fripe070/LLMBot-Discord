@@ -17,8 +17,11 @@ from ..apis import caption
 _logger = logging.getLogger(__name__)
 
 
+def get_attachment_tag(kind: str, cap: str) -> str:
+    return f"<file type={kind}>{cap}</file>"
+
 async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> str:
-    content = message.content.strip()
+    content = message.system_content.strip()
     assert message.guild is not None, "Message must be in a guild"
 
     emoji_map = {str(emoji): f":{emoji.name}:" for emoji in message.guild.emojis}
@@ -40,10 +43,7 @@ async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> 
         try:
             processed_caption = await process_attachment(attachment, ctx=ctx)
         except Exception as error:
-            _logger.error(
-                f"Error processing attachment {attachment.filename!r} {attachment.url!r}: {error!r}",
-                exc_info=error,
-            )
+            _logger.warning(f"Error processing attachment {attachment.filename!r} {attachment.url!r}: {error!r}", exc_info=error)
             continue
         if processed_caption is None:
             _logger.debug(f"Attachment {attachment.filename} could not be processed. Skipping.")
@@ -61,14 +61,11 @@ async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> 
     return content
 
 async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupContext) -> str | None:
-    def get_attachment_tag(kind: str, cap: str) -> str:
-        return f"<file type={kind}>{cap}</file>"
-    
-    unrecognized_file: str = get_attachment_tag(
-        "unknown", 
+    unrecognized_attachment_tag: str = get_attachment_tag(
+        "unknown",
         f'Unsupported attachment type for file "{attachment.filename}"'
     )
-    
+
     if attachment.size > ctx.config.max_attachment_size_mb * 1024 * 1024:
         _logger.debug(
             f"Attachment {attachment.filename} is too large ({attachment.size / (1024 * 1024):.2f} MB). "
@@ -91,7 +88,7 @@ async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupCont
             f"Attachment {attachment.filename} has unsupported content type {attachment.content_type!r}. "
             "Skipping processing."
         )
-        return unrecognized_file
+        return unrecognized_attachment_tag
 
     file = io.BytesIO()
     await attachment.save(file, seek_begin=True)
@@ -104,6 +101,6 @@ async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupCont
         )
         tag = get_attachment_tag("image", caption_text)
         return tag
-    
+
     _logger.warning(f'Attachment of type "{attachment.content_type}" was recognized but not supported.')
-    return unrecognized_file
+    return unrecognized_attachment_tag

@@ -142,10 +142,6 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             f"THis is the result of illegal config state that should have failed a check earlier. "
         )
 
-        # TODO: Temporary. Will exclude images which I dont rly want. Solution until embeds/attachments are handled
-        if not message.content.strip():
-            return
-
         self.channel_histories[message.channel.id].append(message)
 
         if self.bot.user in message.mentions and not message.author.id == self.bot.user.id:
@@ -271,7 +267,11 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                         working_string += f" (replying to [msgid:{i}])"
                         break
             working_string += ": "
-            working_string += await process_incoming(message, ctx=ctx)
+            processed = await process_incoming(message, ctx=ctx)
+            if processed is None:
+                _logger.warning(f"Message #{message_index} ({message.id}) could not be processed. Skipping.")
+                continue
+            working_string += processed
             processed_history.append(working_string)
         return processed_history
 
@@ -308,7 +308,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                     if replying_to_index < 0 or replying_to_index >= len(ctx.history):
                         _logger.debug(f"Reply index {replying_to_index} out of bounds for history length {len(ctx.history)}. Skipping this response.")
                         continue
-                        
+
             if content.strip() in ("", ":"):
                 _logger.debug(f"Empty response from LLM on attempt {attempt_index + 1}. Retrying...")
                 continue
