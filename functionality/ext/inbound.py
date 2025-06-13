@@ -1,3 +1,4 @@
+import datetime
 import io
 import logging
 import re
@@ -20,8 +21,6 @@ _logger = logging.getLogger(__name__)
 def get_attachment_tag(kind: str, cap: str) -> str:
     return f"<file type={kind}>{cap}</file>"
 
-def get_embed_tag(kind: str, summary: str) -> str:
-    return f"<embed type={kind}>{summary}</embed>"
 
 async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> str:
     content = message.system_content.strip()
@@ -64,9 +63,7 @@ async def process_media(message: discord.Message, content: str, *, ctx: CheckupC
             f"{attachment_duration / len(message.attachments):.2f} seconds per attachment."
         )
 
-    print("embeds:", [embed.to_dict() for embed in message.embeds])
-    print("poll:", message.poll)
-
+    embed_start_time = time.process_time()
     content = content.rstrip() + " "
     for embed in message.embeds:
         if embed.type == "image":
@@ -90,15 +87,47 @@ async def process_media(message: discord.Message, content: str, *, ctx: CheckupC
                 content = content.replace(embed.url, embed_tag)
             else:
                 content += embed_tag + " "
-    content = content.strip()
+    content = content.rstrip()
+    if message.embeds:
+        embed_duration = time.process_time() - embed_start_time
+        _logger.debug(
+            f"Processed {len(message.embeds)} embeds in {embed_duration:.2f} seconds. "
+            f"{embed_duration / len(message.embeds):.2f} seconds per embed."
+        )
 
-    # TODO: Polls
-    # TODO: Audio (files and voice messages)
+    if message.poll:
+        try:
+            poll_tag = await process_poll(message.poll, ctx=ctx)
+        except Exception as error:
+            _logger.warning(f"Error processing poll {message.poll!r}: {error!r}", exc_info=error)
+        else:
+            content = content.rstrip() + " " + poll_tag
 
     return content
 
+
+async def process_poll(poll: discord.Poll, *, ctx: CheckupContext) -> str:
+    poll_attrs: dict[str, str] = {
+        "multiple_choice": "true" if poll.multiple else "false",
+    }
+    if poll.duration < datetime.timedelta(days=1):
+        poll_attrs["duration"] = f"{poll.duration.total_seconds()/60/60:.0f}h"
+    else:
+        poll_attrs["duration"] = f"{poll.duration.total_seconds()/60/60/24:.0f}d"
+
+    result = "<poll"
+    for attr, value in poll_attrs.items():
+        result += f' {attr}="{value}"'
+    result += ">"
+    result += f"{poll.question}"
+    for answer in poll.answers:
+        result += f"<answer>{answer.text}</answer>"
+    result += "</poll>"
+    return result
+
+
 async def process_generic_embed(embed: discord.Embed, *, ctx: CheckupContext) -> str | None:
-    if embed.type not in {"rich", "article"}:
+    if embed.type not in {"rich"}: # TODO: Article? No change needs to be made, but it might be best treated as a URL
         _logger.debug(f"Encountered unsupported embed type {embed.type!r}. Skipping processing.")
         return None
 
@@ -120,7 +149,7 @@ async def process_generic_embed(embed: discord.Embed, *, ctx: CheckupContext) ->
         summary += "\n" + img_tag
     summary = summary.strip()
 
-    return get_embed_tag(embed.type, summary)
+    return f"<embed>{summary}</embed>"
 
 
 async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupContext) -> str | None:
