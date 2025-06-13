@@ -196,11 +196,23 @@ async def process_image(image: io.BytesIO | URL, *, ctx: CheckupContext) -> str 
     if isinstance(image, io.BytesIO):
         file = image
     elif isinstance(image, URL):
+        # Only trust discord URLs
+        if not ctx.config.process_untrusted_urls and not (image.host or "").endswith("discord.com"):
+            _logger.debug(f"Untrusted URL {image!r} encountered. Skipping processing.")
+            return None
+        
         async with ctx.apis.session.get(image) as response:
             if response.status != 200:
                 _logger.warning(f"Failed to fetch image from {image!r}: {response.status} {response.reason}")
                 return None
-            file = io.BytesIO(await response.read())
+            # Limit max downloaded size to avoid excessive memory usage and time wastage
+            file = io.BytesIO()
+            async for chunk in response.content.iter_chunked(1024 * 1024): # 1 MB chunks
+                if file.tell() > ctx.config.max_attachment_size_mb * 1024 * 1024:
+                    _logger.debug(f"Image from {image!r} exceeds max size. Skipping processing.")
+                    return None
+                file.write(chunk)
+            file.seek(0)
     else:
         raise ValueError(f"Unsupported image type: {type(image)}. Expected io.BytesIO or URL.")
 

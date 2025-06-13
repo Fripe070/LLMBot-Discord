@@ -96,7 +96,9 @@ class BotConfig(BaseConfigModel):
         text: str = "llama3.1:8b-text-q4_K_M"
         chat: str = "llama3.1:8b-instruct-q4_K_M"
     models: ModelConfig = ModelConfig()
+    
     max_attachment_size_mb: pydantic.PositiveInt = 20
+    process_untrusted_urls: bool = True
 
     channels: Annotated[
         dict[Snowflake, ChannelConfig],
