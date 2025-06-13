@@ -100,4 +100,4 @@ async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupCont
         tag = get_attachment_tag("image", caption_text)
         return tag
     
-    return None
+    return get_attachment_tag("unknown", f'Unsupported attachment type for file "{attachment.filename}".')
