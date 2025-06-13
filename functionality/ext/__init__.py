@@ -130,6 +130,8 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             return False
         bot_sighting_count: int = 0
         for i in range(-channel_config.activity_limit.window_size, 0):
+            if -i >= len(history):
+                continue
             if history[i].author.id == self.bot.user.id:
                 bot_sighting_count += 1
                 if bot_sighting_count >= channel_config.activity_limit.max_bot_messages:
