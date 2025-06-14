@@ -103,7 +103,8 @@ class BotConfig(BaseConfigModel):
     max_attachment_size_mb: pydantic.PositiveInt = 20
     process_untrusted_urls: bool = True
     max_token_count: int = 700
-
+    response_temperature: float = 0.85
+    response_temperature_increment: float = 0.1
     horde_image_style: str | None = None
 
     channels: Annotated[

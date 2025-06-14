@@ -306,13 +306,19 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         ctx: CheckupContext,
     ) -> tuple[DiscordResponse, discord.Message | None]:
         # We simply retry until we get a valid response from the LLM. It can be finicky sometimes.
+        temperature: float = ctx.config.response_temperature
         for attempt_index in range(MAX_GENERATION_RETRIES):
+            if attempt_index > 0:
+                temperature = temperature + ctx.config.response_temperature_increment
+                _logger.debug(f"Retrying LLM generation (attempt {attempt_index + 1}) with temperature {temperature:.2f}.")
+            
             result = await ctx.apis.ollama.generate(
                 model=ctx.config.models.text,
                 prompt=prompt,
                 options=ollama_api.Options(
                     stop=["\n[msgid:"],
                     num_predict=ctx.config.max_token_count,
+                    temperature=temperature,
                 ),
                 keep_alive=5,
             )

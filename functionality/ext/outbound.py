@@ -135,7 +135,7 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         response.attachments.append(discord.File(
             fp=generation,
             filename=f"image_{i}.webp",
-            description=attempt.group(1),
+            description=f'AI-generated image based on the prompt: "{attempt.group(1)}"',
         ))
         
     # TODO: Send polls
