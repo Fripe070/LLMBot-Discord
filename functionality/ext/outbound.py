@@ -17,6 +17,7 @@ from ..util.formatting import URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
 
 __all__ = (
     "process_outgoing",
+    "DiscordResponse",
 )
 
 _logger = logging.getLogger(__name__)
