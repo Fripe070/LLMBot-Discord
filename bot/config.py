@@ -97,7 +97,6 @@ class BotConfig(BaseConfigModel):
     class ModelConfig(BaseConfigModel):
         text: str = "llama3.1:8b-text-q4_K_M"
         chat: str = "llama3.1:8b-instruct-q4_K_M"
-        image: str | None = None
     models: ModelConfig = ModelConfig()
 
     max_attachment_size_mb: pydantic.PositiveInt = 20
