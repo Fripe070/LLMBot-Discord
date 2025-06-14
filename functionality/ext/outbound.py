@@ -85,7 +85,7 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
     # Check if content is too similar to a previously sent response
     similar_enough: int = 0
     for cached in ctx.previously_sent_cache:
-        if fuzz.ratio(content, cached) / 100 >= ctx.channel_config.repeat_prevention.threshold:
+        if fuzz.partial_ratio(content, cached) / 100 >= ctx.channel_config.repeat_prevention.threshold:
             similar_enough += 1
     if similar_enough >= ctx.channel_config.repeat_prevention.max_messages:
         _logger.debug(f"Response content is too similar to previously sent content. Skipping this response.")
