@@ -32,7 +32,7 @@ class LLMBot(commands.Bot):
     ) -> None:
         log_utils.setup_logging(Path(log_directory), level=logging.INFO)
         logging.getLogger(functionality.__name__).setLevel(logging.DEBUG)
-
+        logging.getLogger("httpx").setLevel(logging.WARNING)
         # ty andrew xoxo
         def handle_exception(exc_type: type[BaseException], value: BaseException, traceback: TracebackType) -> None:
             _logger.critical(f"Uncaught {exc_type.__name__}: {value}", exc_info=(exc_type, value, traceback))

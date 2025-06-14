@@ -1,15 +1,18 @@
 import asyncio
 import collections
+import io
 import logging
 import math
 import random
 import re
+import dataclasses
 
+import discord
 from rapidfuzz import fuzz
 from yarl import URL
 
 from .defs import CheckupContext
-from ..apis import searching
+from ..apis import searching, image_gen
 from ..util.formatting import URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
 
 __all__ = (
@@ -18,8 +21,14 @@ __all__ = (
 
 _logger = logging.getLogger(__name__)
 
+@dataclasses.dataclass(kw_only=True)
+class DiscordResponse:
+    content: str
+    attachments: list[discord.File] = dataclasses.field(default_factory=list)
+    embeds: list[discord.Embed] = dataclasses.field(default_factory=list)
 
-async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
+
+async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordResponse | None:
     # Almost guaranteed to be an invalid response
     if re.search(r"[msgid:[0-9]+]", content):
         _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
@@ -78,10 +87,6 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
         _logger.debug(f"{original_url} -> {processed_url}")
         content = content.replace(original_url, processed_url)
 
-    # TODO: Send images
-    # TODO: Send polls
-    # TODO: React to messages
-
     # Check if content is too similar to a previously sent response
     similar_enough: int = 0
     for cached in ctx.previously_sent_cache:
@@ -98,7 +103,46 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> str | None:
         _logger.debug(f"Response content is a number and similar to previously sent content. Skipping this response.")
         return None
 
-    return content
+    response: DiscordResponse = DiscordResponse(content=content)
+
+    image_attempts: list[re.Match[str]] = [match for match in re.finditer(
+        r"(?:<file type=image>|<image>)(.+?)(?:</file>|</image>)",
+        flags=re.IGNORECASE,
+        string=content,
+    )]
+    img_gen_tasks: list[asyncio.Task] = []
+    for i, attempted_image in enumerate(image_attempts):
+        attempted_image_prompt: str = attempted_image.group(1).strip()
+        _logger.debug(f"Attempting to generate image for prompt: {attempted_image_prompt!r}")
+        img_gen_tasks.append(asyncio.create_task(image_gen.generate_image(
+            session=ctx.apis.horde,
+            prompt=attempted_image_prompt,
+            style=ctx.config.horde_image_style,
+        )))
+        if i+1 != len(image_attempts):
+            await asyncio.sleep(10)
+            
+    generated_images: list[io.BytesIO | None | BaseException] = await asyncio.gather(*img_gen_tasks, return_exceptions=True)
+    for i, (attempt, generation) in enumerate(zip(image_attempts, generated_images)):
+        if isinstance(generation, BaseException):
+            _logger.error(f"Error generating image: {generation} for prompt: {attempt.group(1)!r}")
+            continue
+        if generation is None:
+            _logger.debug(f"Image generation failed for prompt: {attempt.group(1)!r}")
+            continue
+        _logger.debug(f"Image generated successfully for prompt: {attempt.group(1)!r}")
+        response.content = response.content.replace(attempt.group(0), "")
+        response.attachments.append(discord.File(
+            fp=generation,
+            filename=f"image_{i}.webp",
+            description=attempt.group(1),
+        ))
+        
+    # TODO: Send polls
+    # TODO: Send embeds
+    # TODO: React to messages
+
+    return response
 
 async def process_url(url: str, *, ctx: CheckupContext) -> str | None:
     try:

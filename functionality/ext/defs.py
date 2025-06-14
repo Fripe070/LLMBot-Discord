@@ -7,6 +7,7 @@ import discord
 import ollama as ollama_api
 
 from bot.config import ChannelConfig, BotConfig
+from ..apis.image_gen import HordeSession
 
 MAX_GENERATION_RETRIES: int = 25
 
@@ -18,6 +19,7 @@ type MessageID = DiscordSnowflake
 class APISet:
     ollama: ollama_api.AsyncClient
     session: aiohttp.ClientSession
+    horde: HordeSession
 
 @dataclasses.dataclass(kw_only=True)
 class CheckupContext:

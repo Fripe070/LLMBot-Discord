@@ -15,8 +15,8 @@ from bot.bot import LLMBot
 from bot.config import DUMMY_SNOWFLAKE, ConfigError, ChannelConfig
 from .defs import APISet, ChannelID, CheckupContext, MAX_GENERATION_RETRIES
 from .inbound import process_incoming
-from .outbound import process_outgoing
-from ..apis import llm
+from .outbound import process_outgoing, DiscordResponse
+from ..apis import llm, image_gen
 from ..util.formatting import chop_string
 
 _logger = logging.getLogger(__name__)
@@ -46,6 +46,11 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         self.apis = APISet(
             ollama=ollama_api.AsyncClient(host=self.bot.config.ollama_url),
             session=aiohttp.ClientSession(),
+            horde=image_gen.HordeSession(
+                api_key=self.bot.config.horde_key,
+                session=aiohttp.ClientSession(),
+                base_url=self.bot.config.horde_url,
+            ),
         )
         
         def runner_done_callback(task: asyncio.Task[None]) -> None:
@@ -62,8 +67,14 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             self.bg_task.cancel()
         if self.apis is not None and not self.apis.session.closed:
             await self.apis.session.close()
+        if self.apis is not None and not self.apis.horde.session.closed:
+            await self.apis.horde.session.close()
 
     async def background_runner(self) -> None:
+        """Background task that runs the checkup loop."""
+        _logger.info("Starting background runner for AI bot functionality.")
+        if self.apis is None:
+            raise RuntimeError("APIs are not initialized. This is likely the result of invalid cog loading.")
         await llm.ensure_downloaded(self.bot.config.models.text, ollama_client=self.apis.ollama)
         await llm.ensure_downloaded(self.bot.config.models.chat, ollama_client=self.apis.ollama)
 
@@ -236,7 +247,9 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             prompt += str(ctx.author_indexes.setdefault(self.bot.user.id, len(ctx.author_indexes)))
         else:
             # TODO: Attempt to have the LLM predict the author rather than using a random one
-            prompt += str(random.choice(tuple(ctx.author_indexes.values())))
+            mimicked_id: int = random.choice(tuple(ctx.author_indexes.values()))
+            prompt = prompt.replace(f"@{ctx.author_indexes[self.bot.user.id]}", f"@{mimicked_id}") # TODO: Flawed. Is there a better way?
+            prompt += str(mimicked_id)
 
         if is_response_to_latest:
             prompt += f" (Replying to [msgid:{len(history) - 1}]): "
@@ -245,24 +258,26 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         if ctx.channel_config.typing_indicator:
             async with ctx.channel.typing():
-                response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
+                response, reply_to = await self.generate_response(prompt, ctx=ctx)
         else:
-            response_content, reply_to = await self.generate_response(prompt, ctx=ctx)
+            response, reply_to = await self.generate_response(prompt, ctx=ctx)
 
-        _logger.debug(f"Sending message in #{channel.name}:\n{response_content}")
-        ctx.previously_sent_cache.append(response_content)
+        _logger.debug(f"Sending message in #{channel.name}:\n{response.content}")
+        ctx.previously_sent_cache.append(response.content)
 
         allowed_mentions = discord.AllowedMentions(replied_user=True, users=True, everyone=False, roles=False)
         # TODO: Do something more intelligent than just chopping the string
         if reply_to is None:
             await channel.send(
-                content=chop_string(response_content, 2000),
+                content=chop_string(response.content, 2000),
                 allowed_mentions=allowed_mentions,
+                files=response.attachments, embeds=response.embeds,
             )
         else:
             await reply_to.reply(
-                content=chop_string(response_content, 2000),
+                content=chop_string(response.content, 2000),
                 allowed_mentions=allowed_mentions,
+                files=response.attachments, embeds=response.embeds,
             )
 
     async def gather_prompt_history(self, ctx: CheckupContext) -> Sequence[str]:
@@ -284,7 +299,12 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             processed_history.append(working_string)
         return processed_history
 
-    async def generate_response(self, prompt: str, *, ctx: CheckupContext) -> tuple[str, discord.Message | None]:
+    async def generate_response(
+        self, 
+        prompt: str, 
+        *, 
+        ctx: CheckupContext,
+    ) -> tuple[DiscordResponse, discord.Message | None]:
         # We simply retry until we get a valid response from the LLM. It can be finicky sometimes.
         for attempt_index in range(MAX_GENERATION_RETRIES):
             result = await ctx.apis.ollama.generate(
@@ -292,7 +312,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 prompt=prompt,
                 options=ollama_api.Options(
                     stop=["\n[msgid:"],
-                    num_predict=500,
+                    num_predict=ctx.config.max_token_count,
                 ),
                 keep_alive=5,
             )
@@ -322,11 +342,11 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 _logger.debug(f"Empty response from LLM on attempt {attempt_index + 1}. Retrying...")
                 continue
 
-            content = await process_outgoing(content, ctx=ctx)
-            if content is None:
+            response: DiscordResponse | None = await process_outgoing(content, ctx=ctx)
+            if response is None:
                 _logger.debug(f"Processed content is None for response: {result.response!r}. Skipping this response.")
                 continue
-            return content, ctx.history[replying_to_index] if replying_to_index is not None else None
+            return response, ctx.history[replying_to_index] if replying_to_index is not None else None
 
         raise RuntimeError(f"Failed to generate a valid response after {MAX_GENERATION_RETRIES} attempts.")
 

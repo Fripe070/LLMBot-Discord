@@ -22,6 +22,9 @@ def get_attachment_tag(kind: str, cap: str) -> str:
     return f"<file type={kind}>{cap}</file>"
 
 
+attachment_cache: dict[str, str] = {}
+
+
 async def process_incoming(message: discord.Message, *, ctx: CheckupContext) -> str:
     content = message.system_content.strip()
     assert message.guild is not None, "Message must be in a guild"
@@ -43,8 +46,13 @@ async def process_media(message: discord.Message, content: str, *, ctx: CheckupC
     attachment_start_time = time.process_time()
     content = content.rstrip() + " "
     for attachment in message.attachments:
+        if attachment.url in attachment_cache:
+            _logger.debug(f"Using cached caption for attachment {attachment.filename!r} {attachment.url!r}.")
+            content += attachment_cache[attachment.url] + " "
+            continue
+            
         try:
-            processed_caption = await process_attachment(attachment, ctx=ctx)
+            processed_caption: str | None = await process_attachment(attachment, ctx=ctx)
         except Exception as error:
             _logger.warning(
                 f"Error processing attachment {attachment.filename!r} {attachment.url!r}: {error!r}", exc_info=error
@@ -54,6 +62,7 @@ async def process_media(message: discord.Message, content: str, *, ctx: CheckupC
             _logger.debug(f"Attachment {attachment.filename} could not be processed. Skipping.")
             continue
         _logger.debug(f"Processed attachment {attachment.filename!r} {attachment.url}:\n{processed_caption!r}")
+        attachment_cache[attachment.url] = processed_caption
         content += processed_caption + " "
     content = content.strip()
     if message.attachments:

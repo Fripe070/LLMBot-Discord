@@ -3,7 +3,7 @@ import json
 import logging
 import random
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import pydantic
 
@@ -91,14 +91,20 @@ class BotConfig(BaseConfigModel):
     google_api_key: str = "<google api key goes here>"
     ollama_url: str = "http://localhost:11434"
     searx_url: str = "<searx instance URL goes here>"
+    horde_key: str = "0"*10
+    horde_url: str = "https://aihorde.net/api/"
 
     class ModelConfig(BaseConfigModel):
         text: str = "llama3.1:8b-text-q4_K_M"
         chat: str = "llama3.1:8b-instruct-q4_K_M"
+        image: str | None = None
     models: ModelConfig = ModelConfig()
-    
+
     max_attachment_size_mb: pydantic.PositiveInt = 20
     process_untrusted_urls: bool = True
+    max_token_count: int = 700
+
+    horde_image_style: str | None = None
 
     channels: Annotated[
         dict[Snowflake, ChannelConfig],
