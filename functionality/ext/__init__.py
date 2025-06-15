@@ -2,10 +2,12 @@ import asyncio
 import collections
 import datetime
 import io
+import json
 import logging
 import random
 import time
 from collections.abc import Sequence
+from typing import Literal
 
 import aiohttp
 import discord
@@ -35,6 +37,12 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         self.schedule: dict[discord.TextChannel, datetime.datetime] = {}
         self.channel_histories: dict[ChannelID, collections.deque[discord.Message]] = {}
         self.channel_responses_sent: dict[ChannelID, collections.deque[str]] = {}
+
+        self.models: dict[Literal["text", "chat", "reasoning"], str] = {
+            "text": self.bot.config.models.text,
+            "chat": self.bot.config.models.chat,
+            "reasoning": self.bot.config.models.reasoning,
+        }
 
         for channel in self.bot.config.channels.values():
             if channel.channel_id == DUMMY_SNOWFLAKE:
@@ -76,11 +84,10 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         _logger.info("Starting background runner for AI bot functionality.")
         if self.apis is None:
             raise RuntimeError("APIs are not initialized. This is likely the result of invalid cog loading.")
-        await asyncio.gather(
-            llm.ensure_downloaded(self.bot.config.models.text, ollama_client=self.apis.ollama),
-            llm.ensure_downloaded(self.bot.config.models.chat, ollama_client=self.apis.ollama),
-            llm.ensure_downloaded(self.bot.config.models.reasoning, ollama_client=self.apis.ollama),
-        )
+        await asyncio.gather(*(
+            llm.ensure_downloaded(model, ollama_client=self.apis.ollama)
+            for model in self.models.values()
+        ))
 
         await self.bot.wait_until_ready()
 
@@ -397,7 +404,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             thoughts = thoughts.removeprefix(self.bot.config.think_tokens[0]).strip()
 
         thoughts_file: discord.File | None =discord.File(
-            fp=io.BytesIO(thoughts.encode("utf-8")), 
+            fp=io.BytesIO(thoughts.encode("utf-8")),
             filename="thoughts.txt"
         ) if thoughts else None
 
@@ -407,6 +414,39 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             file=thoughts_file or discord.utils.MISSING, # type checker hates me :(
             allowed_mentions=allowed_mentions,
         )
+
+    @commands.hybrid_command(name="models")
+    async def models_get_command(self, ctx: commands.Context) -> None:
+        """Command to get information on the models used in the bot."""
+        if not self.is_cog_ready:
+            await ctx.send("The bot is not ready yet. Please try again.", ephemeral=True)
+            return
+        if self.apis is None:
+            raise RuntimeError("APIs are not initialized. This is likely the result of invalid cog loading.")
+        embed = discord.Embed(title="Available Models", color=discord.Color.blue())
+        for model_type, model in self.models.items():
+            try:
+                model_info = await self.apis.ollama.show(model)
+                name: str = model.partition(":")[0]
+                full_name: str | None = (model_info.modelinfo or {}).get("general.basename", "") or None
+                if full_name == name:
+                    full_name = None
+                embed.add_field(
+                    name=model_type.title(),
+                    value=(
+                        f"**Name:** {name.replace("-", " ").strip()}\n"
+                        + (f"**Full Name:** {full_name}\n" if full_name else "") +
+                        f"**Family:** {model_info.details.family if model_info.details and model_info.details.family else "Unknown"}\n"
+                        f"**Size:** {model_info.details.parameter_size if model_info.details and model_info.details.parameter_size else "Unknown"}\n"
+                        f"**Quantization:** {model_info.details.quantization_level if model_info.details and model_info.details.quantization_level else "Unknown"}\n"
+                        f"**Capabilities:** {", ".join(model_info.capabilities or ["Unknown"]) or "None"}\n"
+                    ),
+                    inline=False,
+                )
+            except Exception as error:
+                _logger.error(f"Failed to fetch model info for {model}: {error}")
+                embed.add_field(name=model, value=f"Error fetching model info.")
+        await ctx.reply(embed=embed)
 
 
 async def setup(bot: LLMBot) -> None:
