@@ -73,8 +73,8 @@ class ChannelConfig(BaseConfigModel):
     history: History = History()
 
     class ActivityLimit(BaseConfigModel):
-        window_size: int = 20
-        max_bot_messages: int = 3
+        window_size: int = 15
+        max_bot_messages: int = 2
     activity_limit: ActivityLimit = ActivityLimit()
     
     class SimilarityLimits(BaseConfigModel):
@@ -97,11 +97,14 @@ class BotConfig(BaseConfigModel):
     class ModelConfig(BaseConfigModel):
         text: str = "llama3.1:8b-text-q4_K_M"
         chat: str = "llama3.1:8b-instruct-q4_K_M"
+        reasoning: str = "deepseek-r1:8b"
     models: ModelConfig = ModelConfig()
 
     max_attachment_size_mb: pydantic.PositiveInt = 20
     process_untrusted_urls: bool = True
     max_token_count: int = 700
+    max_reasoning_model_token_count: int = 1000
+    think_tokens: tuple[str, str] = ("<think>", "</think>")
     response_temperature: float = 0.85
     response_temperature_increment: float = 0.1
     horde_image_style: str | None = None

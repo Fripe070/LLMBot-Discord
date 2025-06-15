@@ -31,4 +31,10 @@ class CheckupContext:
     author_indexes: dict[DiscordSnowflake, int] = dataclasses.field(default_factory=dict)
     previously_sent_cache: collections.deque[str]
     is_response_to_latest: bool
-    
+
+class NullAsyncContext:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass

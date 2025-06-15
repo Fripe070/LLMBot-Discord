@@ -23,6 +23,7 @@ class LLMBot(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
+        await self.load_extension("bot.ext.meta")
         await self.load_extension("functionality.ext") # Core functionality
 
     def run_llmbot(

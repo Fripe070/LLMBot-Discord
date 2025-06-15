@@ -1,6 +1,7 @@
 import asyncio
 import collections
 import datetime
+import io
 import logging
 import random
 import time
@@ -13,7 +14,7 @@ from discord.ext import commands
 
 from bot.bot import LLMBot
 from bot.config import DUMMY_SNOWFLAKE, ConfigError, ChannelConfig
-from .defs import APISet, ChannelID, CheckupContext, MAX_GENERATION_RETRIES
+from .defs import APISet, ChannelID, CheckupContext, MAX_GENERATION_RETRIES, NullAsyncContext
 from .inbound import process_incoming
 from .outbound import process_outgoing, DiscordResponse
 from ..apis import llm, image_gen
@@ -75,8 +76,11 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         _logger.info("Starting background runner for AI bot functionality.")
         if self.apis is None:
             raise RuntimeError("APIs are not initialized. This is likely the result of invalid cog loading.")
-        await llm.ensure_downloaded(self.bot.config.models.text, ollama_client=self.apis.ollama)
-        await llm.ensure_downloaded(self.bot.config.models.chat, ollama_client=self.apis.ollama)
+        await asyncio.gather(
+            llm.ensure_downloaded(self.bot.config.models.text, ollama_client=self.apis.ollama),
+            llm.ensure_downloaded(self.bot.config.models.chat, ollama_client=self.apis.ollama),
+            llm.ensure_downloaded(self.bot.config.models.reasoning, ollama_client=self.apis.ollama),
+        )
 
         await self.bot.wait_until_ready()
 
@@ -248,7 +252,8 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         else:
             # TODO: Attempt to have the LLM predict the author rather than using a random one
             mimicked_id: int = random.choice(tuple(ctx.author_indexes.values()))
-            prompt = prompt.replace(f"@{ctx.author_indexes[self.bot.user.id]}", f"@{mimicked_id}") # TODO: Flawed. Is there a better way?
+            if self.bot.user.id in ctx.author_indexes: # If present it has been encountered before, maybe with a mention
+                prompt = prompt.replace(f"@{ctx.author_indexes[self.bot.user.id]}", f"@{mimicked_id}") # TODO: Flawed. Is there a better way?
             prompt += str(mimicked_id)
 
         if is_response_to_latest:
@@ -256,10 +261,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         _logger.debug(f"Working prompt for channel #{channel.name}:\n{prompt}")
 
-        if ctx.channel_config.typing_indicator:
-            async with ctx.channel.typing():
-                response, reply_to = await self.generate_response(prompt, ctx=ctx)
-        else:
+        async with (ctx.channel.typing() if ctx.channel_config.typing_indicator else NullAsyncContext()):
             response, reply_to = await self.generate_response(prompt, ctx=ctx)
 
         _logger.debug(f"Sending message in #{channel.name}:\n{response.content}")
@@ -355,6 +357,56 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             return response, ctx.history[replying_to_index] if replying_to_index is not None else None
 
         raise RuntimeError(f"Failed to generate a valid response after {MAX_GENERATION_RETRIES} attempts.")
+
+    @commands.hybrid_command(name="nerd")
+    @commands.guild_only()
+    async def nerd_command(self, ctx: commands.Context, *, prompt: str) -> None:
+        """Command to chat with a reasoning model."""
+        if not self.is_cog_ready:
+            await ctx.send("The bot is not ready yet. Please try again.", ephemeral=True)
+            return
+        if self.apis is None:
+            raise RuntimeError("APIs are not initialized. This is likely the result of invalid cog loading.")
+        if not isinstance(ctx.channel, discord.TextChannel):
+            await ctx.send("This command can only be used in guild text channels.", ephemeral=True)
+            return
+
+        if ctx.interaction is not None:
+            await ctx.defer()
+
+        typing_indicator: bool = (
+            self.bot.config.channels[ctx.channel.id].typing_indicator
+            if ctx.channel.id in self.bot.config.channels else True
+        ) if ctx.interaction is None else False
+        async with (ctx.channel.typing() if typing_indicator else NullAsyncContext()):
+            result = await self.apis.ollama.chat(
+                model=self.bot.config.models.reasoning,
+                messages=[ollama_api.Message(role="user", content=prompt)],
+                options=ollama_api.Options(num_predict=self.bot.config.max_reasoning_model_token_count),
+                keep_alive=15,
+            )
+        if not result.message.content:
+            await (ctx.reply if ctx.interaction is None else ctx.interaction.followup.send
+                   )(content="No content was returned by the model.")
+            return
+
+        if result.message.thinking is not None:
+            thoughts, content = result.message.thinking, result.message.content
+        else:
+            thoughts, _, content = result.message.content.partition(self.bot.config.think_tokens[1])
+            thoughts = thoughts.removeprefix(self.bot.config.think_tokens[0]).strip()
+
+        thoughts_file: discord.File | None =discord.File(
+            fp=io.BytesIO(thoughts.encode("utf-8")), 
+            filename="thoughts.txt"
+        ) if thoughts else None
+
+        allowed_mentions = discord.AllowedMentions(replied_user=True, users=False, everyone=False, roles=False)
+        await (ctx.reply if ctx.interaction is None else ctx.interaction.followup.send)(
+            content=chop_string(content, 2000),
+            file=thoughts_file or discord.utils.MISSING, # type checker hates me :(
+            allowed_mentions=allowed_mentions,
+        )
 
 
 async def setup(bot: LLMBot) -> None:
