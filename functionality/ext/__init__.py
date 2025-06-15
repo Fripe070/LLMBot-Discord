@@ -403,15 +403,22 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             thoughts, _, content = result.message.content.partition(self.bot.config.think_tokens[1])
             thoughts = thoughts.removeprefix(self.bot.config.think_tokens[0]).strip()
 
-        thoughts_file: discord.File | None =discord.File(
-            fp=io.BytesIO(thoughts.encode("utf-8")),
-            filename="thoughts.txt"
-        ) if thoughts else None
+        files: list[discord.File] | None = []
+        if len(content) > 2000:
+            files.append(discord.File(
+                fp=io.BytesIO(content.encode("utf-8")),
+                filename="response.txt"
+            ))
+        if thoughts:
+            files.append(discord.File(
+                fp=io.BytesIO(thoughts.encode("utf-8")),
+                filename="thoughts.txt"
+            ))
 
         allowed_mentions = discord.AllowedMentions(replied_user=True, users=False, everyone=False, roles=False)
         await (ctx.reply if ctx.interaction is None else ctx.interaction.followup.send)(
-            content=chop_string(content, 2000),
-            file=thoughts_file or discord.utils.MISSING, # type checker hates me :(
+            content=content if len(content) <= 2000 else "Response too long to send. See the attached file.",
+            files=files or discord.utils.MISSING, # type checker hates me :(
             allowed_mentions=allowed_mentions,
         )
 
