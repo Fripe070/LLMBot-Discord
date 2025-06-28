@@ -40,12 +40,23 @@ def resize_within(
     result.paste(resized_img, ((box[0] - resized_img.width) // 2, (box[1] - resized_img.height) // 2))
     return result
 
+def clamp_size(
+    image: Image.Image,
+    *,
+    max_size: tuple[int, int] = (896, 896),
+) -> Image.Image:
+    if image.width <= max_size[0] and image.height <= max_size[1]:
+        return image
+    image.thumbnail(max_size, Image.Resampling.LANCZOS)
+    return image
+
 
 def _process_image(img: Image.Image | io.BytesIO) -> bytes:
     if isinstance(img, io.BytesIO):
         img = Image.open(img)
     output = io.BytesIO()
-    resize_within(img).save(output, format="PNG")
+    # resize_within(img).save(output, format="PNG")
+    clamp_size(img).save(output, format="PNG")
     return output.getvalue()
 
 
