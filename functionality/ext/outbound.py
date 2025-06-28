@@ -38,6 +38,10 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
     if "<file type=unknown>" in content:
         _logger.debug("Content contains unknown file type tag. Skipping processing.")
         return None
+    
+    if content.startswith(tuple(map(str, range(10)))):  # STOP SENDING NUMBERS :sob:
+        _logger.debug(f"Content starts with a number: {content!r}. Skipping processing.")
+        return None
 
     character_counts = collections.Counter(content)
     frequencies = ((c / len(content)) for c in character_counts.values())
