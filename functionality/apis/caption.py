@@ -12,7 +12,7 @@ __all__ = ("generate_image_caption", "supports_vision")
 _logger = logging.getLogger(__name__)
 
 IMAGE_CAPTION_PROMPT = (
-    "Describe this image in detail but in a single line. "
+    "Describe this image in detail. "
     "Only include the image description and any text that appears within the image in your response."
 )
 
@@ -78,13 +78,22 @@ async def generate_image_caption(
     loop = asyncio.get_running_loop()
     processed = await loop.run_in_executor(None, _process_image, image)
 
-    result = await ollama_client.generate(
+    result = await ollama_client.chat(
         model=model,
-        prompt=prompt,
-        images=[ollama_api.Image(value=processed)],
+        messages=[
+            ollama_api.Message(
+                role="user",
+                content=prompt,
+                images=[ollama_api.Image(value=processed)],
+            ),
+            ollama_api.Message(role="assistant", content="An image of "),
+        ],
         options=ollama_api.Options(
-            stop=["\n"],
             num_predict=150,
+            temperature=0,
         ),
     )
-    return result.response.strip()
+    if not result.message.content or not result.message.content.strip():
+        _logger.warning("Received empty caption from model.")
+        return ""
+    return result.message.content.strip().replace("\n", " ")
