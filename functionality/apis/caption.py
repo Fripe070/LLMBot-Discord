@@ -11,9 +11,9 @@ __all__ = ("generate_image_caption", "supports_vision")
 
 _logger = logging.getLogger(__name__)
 
-IMAGE_CAPTION_PROMPT = (
-    "Describe this image in detail. "
-    "Only include the image description and any text that appears within the image in your response."
+IMAGE_CAPTION_PROMPT: str = (
+    "Write a suitable caption for this image that encapsulates all the important details. "
+    "Captions are in pure plaintext and do not include any special formatting."
 )
 
 _vision_capabilities: dict[str, bool] = {}
@@ -66,6 +66,7 @@ async def generate_image_caption(
     model: str,
     ollama_client: ollama_api.AsyncClient,
     prompt: str = IMAGE_CAPTION_PROMPT,
+    seed: int | None = 0,
 ) -> str:
     if not await supports_vision(model, ollama_client):
         raise ValueError(f"Model {model} does not support vision capabilities.")
@@ -82,8 +83,11 @@ async def generate_image_caption(
         model=model,
         messages=[
             ollama_api.Message(
-                role="user",
+                role="system",
                 content=prompt,
+            ),
+            ollama_api.Message(
+                role="user",
                 images=[ollama_api.Image(value=processed)],
             ),
             ollama_api.Message(role="assistant", content="An image of "),
@@ -91,9 +95,10 @@ async def generate_image_caption(
         options=ollama_api.Options(
             num_predict=150,
             temperature=0,
+            seed=seed,
         ),
     )
     if not result.message.content or not result.message.content.strip():
         _logger.warning("Received empty caption from model.")
         return ""
-    return result.message.content.strip().replace("\n", " ")
+    return " ".join(line.strip() for line in result.message.content.splitlines() if line.lstrip())
