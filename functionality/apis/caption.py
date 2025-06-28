@@ -13,7 +13,9 @@ _logger = logging.getLogger(__name__)
 
 IMAGE_CAPTION_PROMPT: str = (
     "Write a suitable caption for this image that encapsulates all the important details. "
+    "Captions are objective and do not include speculation. "
     "Captions are in pure plaintext and do not include any special formatting."
+    "Captions are concise and no longer than AT MAXIMUM 100 words. "
 )
 
 _vision_capabilities: dict[str, bool] = {}
@@ -43,7 +45,7 @@ def resize_within(
 def clamp_size(
     image: Image.Image,
     *,
-    max_size: tuple[int, int] = (896, 896),
+    max_size: tuple[int, int] = (2**10, 2**10),
 ) -> Image.Image:
     if image.width <= max_size[0] and image.height <= max_size[1]:
         return image
@@ -66,7 +68,6 @@ async def generate_image_caption(
     model: str,
     ollama_client: ollama_api.AsyncClient,
     prompt: str = IMAGE_CAPTION_PROMPT,
-    seed: int | None = 0,
 ) -> str:
     if not await supports_vision(model, ollama_client):
         raise ValueError(f"Model {model} does not support vision capabilities.")
@@ -94,8 +95,7 @@ async def generate_image_caption(
         ],
         options=ollama_api.Options(
             num_predict=150,
-            temperature=0,
-            seed=seed,
+            temperature=0.1,
         ),
     )
     if not result.message.content or not result.message.content.strip():

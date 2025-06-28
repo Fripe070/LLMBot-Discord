@@ -160,6 +160,9 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                     return True
         return False
 
+    # TODO: Append reactions to the history as fake messages so the bot is also able to use reactions
+    #  Note: I will likely need to refactor a lot to accommodate a history not just including messages
+    #  and make sure the inserted elements do not present as real messages the bot is able to try reply to
     @commands.Cog.listener("on_message")
     async def on_message(self, message: discord.Message) -> None:
         if not self.is_cog_ready:
