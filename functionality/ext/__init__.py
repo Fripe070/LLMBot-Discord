@@ -402,6 +402,12 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         else:
             thoughts, _, content = result.message.content.partition(self.bot.config.think_tokens[1])
             thoughts = thoughts.removeprefix(self.bot.config.think_tokens[0]).strip()
+            
+        if not content.strip():
+            await (ctx.reply if ctx.interaction is None else ctx.interaction.followup.send)(
+                content="No content was returned by the model."
+            )
+            return
 
         files: list[discord.File] | None = []
         if len(content) > 2000:
@@ -409,6 +415,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 fp=io.BytesIO(content.encode("utf-8")),
                 filename="response.txt"
             ))
+            content = "Response too long to send. See the attached file."
         if thoughts:
             files.append(discord.File(
                 fp=io.BytesIO(thoughts.encode("utf-8")),
@@ -417,7 +424,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
 
         allowed_mentions = discord.AllowedMentions(replied_user=True, users=False, everyone=False, roles=False)
         await (ctx.reply if ctx.interaction is None else ctx.interaction.followup.send)(
-            content=content if len(content) <= 2000 else "Response too long to send. See the attached file.",
+            content=content,
             files=files or discord.utils.MISSING, # type checker hates me :(
             allowed_mentions=allowed_mentions,
         )
