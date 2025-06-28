@@ -50,6 +50,15 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         _logger.debug(f"Content has too high entropy: {entropy:.2f}. Skipping processing.")
         return None
 
+    # REMEMBER TO UPDATE THE ACTUAL GENERATION IF CHANGING THIS REGEX!
+    if not (
+        len(re.findall(r"<file type=image>|<image>", flags=re.IGNORECASE, string=content))
+        == 
+        len(re.findall(r"</(?:file>|image)>", flags=re.IGNORECASE, string=content))
+    ):
+        _logger.debug("Mismatched amount of image start and end tags.")
+        return None
+
     # Replace emotes with their Discord representation
     emoji_map = {f":{emoji.name}:": emoji for emoji in ctx.channel.guild.emojis}
     for emoji_str, emoji in emoji_map.items():
@@ -109,7 +118,8 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         return None
 
     response: DiscordResponse = DiscordResponse(content=content)
-
+    
+    # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
     image_attempts: list[re.Match[str]] = [match for match in re.finditer(
         r"(?:<file type=image>|<image>)(.+?)(?:</file>|</image>)",
         flags=re.IGNORECASE,
