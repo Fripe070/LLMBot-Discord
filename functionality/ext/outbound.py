@@ -155,6 +155,26 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         
     # TODO: Send polls
     # TODO: Send embeds
+
+    embed_attempts: list[re.Match[str]] = [match for match in re.finditer(
+        r"<embed>(.+?)</embed>",
+        flags=re.IGNORECASE,
+        string=content,
+    )]
+    for embed_attempt in embed_attempts:
+        # TODO: Support more complex embeds (colours, images?)
+        embed_content: str = embed_attempt.group(1).strip()
+        _logger.debug(f"Attempting to create embed from content: {embed_content!r}")
+        if not embed_content.startswith("#"):
+            title, description = None, embed_content
+        else:
+            title, _, description = embed_content.partition("\n")
+            title = title.lstrip("#")
+        response.embeds.append(discord.Embed(
+            title=title,
+            description=description,
+        ))
+
     # TODO: React to messages
 
     return response
