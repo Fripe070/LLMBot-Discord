@@ -14,6 +14,7 @@ __all__ = (
 )
 
 from ..apis import caption
+from ..util.formatting import col_to_hex
 
 _logger = logging.getLogger(__name__)
 
@@ -158,7 +159,10 @@ async def process_generic_embed(embed: discord.Embed, *, ctx: CheckupContext) ->
         summary += "\n" + img_tag
     summary = summary.strip()
 
-    return f"<embed>{summary}</embed>"
+    if embed.colour is None:
+        return f"<embed>{summary}</embed>"
+    else:
+        return f'<embed color="{col_to_hex(embed.colour)}">{summary}</embed>'
 
 
 async def process_attachment(attachment: discord.Attachment, *, ctx: CheckupContext) -> str | None:

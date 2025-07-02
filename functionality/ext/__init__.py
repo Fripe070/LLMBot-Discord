@@ -274,7 +274,12 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         async with (ctx.channel.typing() if ctx.channel_config.typing_indicator else NullAsyncContext()):
             response, reply_to = await self.generate_response(prompt, ctx=ctx)
 
-        _logger.debug(f"Sending message in #{channel.name}:\n{response.content}")
+        _logger.debug(
+            f"Sending message in #{channel.name}"
+            + (f" with {len(response.attachments)} attachments" if response.attachments else "")
+            + (f" with {len(response.embeds)} embeds" if response.embeds else "")
+            + f":\n{response.content}"
+        )
         ctx.previously_sent_cache.append(response.content)
 
         allowed_mentions = discord.AllowedMentions(replied_user=True, users=True, everyone=False, roles=False)

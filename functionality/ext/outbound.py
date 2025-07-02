@@ -122,7 +122,7 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
     # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
     image_attempts: list[re.Match[str]] = [match for match in re.finditer(
         r"(?:<file type=image>|<image>)(.+?)(?:</file>|</image>)",
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE | re.DOTALL,
         string=content,
     )]
     img_gen_tasks: list[asyncio.Task] = []
@@ -154,25 +154,32 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         ))
         
     # TODO: Send polls
-    # TODO: Send embeds
 
     embed_attempts: list[re.Match[str]] = [match for match in re.finditer(
-        r"<embed>(.+?)</embed>",
-        flags=re.IGNORECASE,
+        r'<embed(?:\s+colou?r="(?P<colour>.+?)")?>(?P<content>.+?)</embed>',
+        flags=re.IGNORECASE | re.DOTALL,
         string=content,
     )]
     for embed_attempt in embed_attempts:
-        # TODO: Support more complex embeds (colours, images?)
-        embed_content: str = embed_attempt.group(1).strip()
+        embed_content: str = embed_attempt["content"].strip()
         _logger.debug(f"Attempting to create embed from content: {embed_content!r}")
         if not embed_content.startswith("#"):
             title, description = None, embed_content
         else:
             title, _, description = embed_content.partition("\n")
             title = title.lstrip("#")
+        colour: discord.Colour | None = None
+        if embed_attempt["colour"]:
+            try:
+                colour = discord.Colour.from_str(embed_attempt["colour"])
+            except ValueError:
+                _logger.debug(f"Embed colour could not be converted: {embed_attempt['colour']!r}. Skipping.")
+
+        response.content = response.content.replace(embed_attempt.group(0), "")
         response.embeds.append(discord.Embed(
             title=title,
             description=description,
+            colour=colour,
         ))
 
     # TODO: React to messages

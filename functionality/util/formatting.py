@@ -2,6 +2,8 @@ import datetime
 import enum
 import re
 
+import discord
+
 
 def link(url: str, cover_text: str, should_embed: bool = True, tooltip: str | None = None) -> str:
     """
@@ -86,3 +88,6 @@ URL_LINK_REGEX: re.Pattern = re.compile(
     """,
     flags=re.VERBOSE,
 )
+
+def col_to_hex(colour: discord.Colour) -> str:
+    return f"#{colour.r:02x}{colour.g:02x}{colour.b:02x}"
