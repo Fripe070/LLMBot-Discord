@@ -118,12 +118,13 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         return None
 
     response: DiscordResponse = DiscordResponse(content=content)
+    del content  # I have accidentally tried writing to this so many times
     
     # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
     image_attempts: list[re.Match[str]] = [match for match in re.finditer(
         r"(?:<file type=image>|<image>)(.+?)(?:</file>|</image>)",
         flags=re.IGNORECASE | re.DOTALL,
-        string=content,
+        string=response.content,
     )]
     img_gen_tasks: list[asyncio.Task] = []
     for i, attempted_image in enumerate(image_attempts):
@@ -158,7 +159,7 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
     embed_attempts: list[re.Match[str]] = [match for match in re.finditer(
         r'<embed(?:\s+colou?r="(?P<colour>.+?)")?>(?P<content>.+?)</embed>',
         flags=re.IGNORECASE | re.DOTALL,
-        string=content,
+        string=response.content,
     )]
     for embed_attempt in embed_attempts:
         embed_content: str = embed_attempt["content"].strip()
