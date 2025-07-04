@@ -230,15 +230,25 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
         )
 
         prompt: str = (
-            "The following is the chat history of a Discord channel. Markdown is supported.\n"
+            f"<context>\n"
+            "The following is a  snippet of chat history from a Discord channel.\n"
             "Mention format: `@UserID`. For example: @1 for User #1.\n"
+            "Discord-style markdown is supported, including: **bold**, *italic*, ||spoiler||. Note that HTML is NOT supported.\n"
+            "A select few meta-elements can be sent using special XML-like syntax with placeholder values:\n"
+            "Image: `<image>Detailed image description</image>`\n"
+            "Embed: `<embed># title\nContent of the embed</embed>`\n"
+            'Poll: `<poll question="Question"><answer>Possible answer 1</answer><answer>Possible answer 2</answer><answer>Possible answer 3</answer></poll>`\n'
+            "Emote: `:{Emote name}:`\n"
+            f"Available emotes: {
+                ', '.join(f'`:{emoji.name}:`' for emoji in channel.guild.emojis) if channel.guild.emojis else 'N/A'
+            }\n"
+            "</context>\n"
+            "\n"
+            "Chat history:\n"
         )
-        if channel.guild.emojis:
-            emojis = " ".join(f":{emoji.name}:" for emoji in channel.guild.emojis)
-            prompt += f"Chatroom emotes: {emojis}\n"
 
         prompt_history: Sequence[str] = await self.gather_prompt_history(ctx)
-        prompt += "\n" + "\n".join(prompt_history) + "\n"
+        prompt += "\n".join(prompt_history) + "\n"
 
         appropriate_history_length = (
             ctx.channel_config.history.limit_responding
@@ -289,12 +299,14 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
                 content=chop_string(response.content, 2000),
                 allowed_mentions=allowed_mentions,
                 files=response.attachments, embeds=response.embeds,
+                poll=response.poll if response.poll else None,
             )
         else:
             await reply_to.reply(
                 content=chop_string(response.content, 2000),
                 allowed_mentions=allowed_mentions,
                 files=response.attachments, embeds=response.embeds,
+                poll=response.poll if response.poll else None,
             )
 
     async def gather_prompt_history(self, ctx: CheckupContext) -> Sequence[str]:

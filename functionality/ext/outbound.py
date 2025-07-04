@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import datetime
 import io
 import logging
 import math
@@ -27,6 +28,7 @@ class DiscordResponse:
     content: str
     attachments: list[discord.File] = dataclasses.field(default_factory=list)
     embeds: list[discord.Embed] = dataclasses.field(default_factory=list)
+    poll: discord.Poll | None = None
 
 
 async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordResponse | None:
@@ -35,13 +37,21 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
         return None
 
-    if "<file type=unknown>" in content:
-        _logger.debug("Content contains unknown file type tag. Skipping processing.")
+    if "<img src=" in content or "<image src=" in content:
+        _logger.debug("Content contains html-style image tag. Skipping processing.")
         return None
     
     if content.startswith(tuple(map(str, range(10)))):  # STOP SENDING NUMBERS :sob:
         _logger.debug(f"Content starts with a number: {content!r}. Skipping processing.")
         return None
+    
+    # It sometimes just tries to send html tags...
+    content = content.replace("<bold>", "**").replace("</bold>", "**")
+    content = content.replace("<italic>", "*").replace("</italic>", "*")
+    content = content.replace("<underline>", "__").replace("</underline>", "__")
+    content = content.replace("<strike>", "~~").replace("</strike>", "~~")
+    content = content.replace("<code>", "`").replace("</code>", "`")
+    content = content.replace("<spoiler>", "||").replace("</spoiler>", "||")
 
     character_counts = collections.Counter(content)
     frequencies = ((c / len(content)) for c in character_counts.values())
@@ -52,7 +62,7 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
 
     # REMEMBER TO UPDATE THE ACTUAL GENERATION IF CHANGING THIS REGEX!
     tag_counts = collections.Counter(re.findall(
-        r"""<(file type=image|image|embed(?: +colou?r="+?")?)>""",
+        r"""<(file type="image"|image|embed(?: +colou?r="+?")?)>""",
         flags=re.IGNORECASE,
         string=content,
     ))
@@ -71,14 +81,16 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         content = content.replace(emoji_str, str(emoji))
 
     inverse_author_indexes = {v: k for k, v in ctx.author_indexes.items()}
+    assert len(inverse_author_indexes) > 0, "There must be at least one author index in the context."
     for match_full, match_index in (
         *re.findall(r"(@#?([0-9]+)\b)", content),
         *re.findall(r"((?:@|\b)User ?#?([0-9]+)\b)", content, flags=re.IGNORECASE),
     ):
         match_index_int = int(match_index)
         if 0 <= match_index_int >= len(inverse_author_indexes):
-            _logger.debug(f"Invalid author index {match_index_int} in content: {content!r}. Skipping processing.")
-            return None
+            # *sigh* just pick one at random
+            _logger.debug(f"Invalid author index {match_index_int} in content: {content!r}. Using a random author.")
+            match_index_int = random.choice(list(inverse_author_indexes.keys()))
         mapped_snowflake = inverse_author_indexes.get(match_index_int, None)
         if mapped_snowflake is None:
             _logger.debug(
@@ -125,10 +137,41 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
 
     response: DiscordResponse = DiscordResponse(content=content)
     del content  # I have accidentally tried writing to this so many times
-    
+
+    # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
+    poll_attempts: list[re.Match[str]] = [match for match in re.finditer(
+        r'<poll question="(?P<question>.+?)(?P<multiple> +multiple_choice="true")?">(?P<inner>.+?)</poll>',
+        flags=re.IGNORECASE | re.DOTALL,
+        string=response.content,
+    )]
+    for poll_attempt in poll_attempts:
+        question: str = poll_attempt["question"].strip()
+        answers: list[str] = re.findall(
+            r'<answer>(.+?)</answer>',
+            flags=re.IGNORECASE | re.DOTALL,
+            string=poll_attempt["inner"],
+        )
+        if not answers:
+            _logger.debug(f"No answers found in poll attempt: {poll_attempt.group(0)!r}. Skipping.")
+            continue
+        _logger.debug(f"Creating poll with question: {question!r} and answers: {answers!r}")
+        response.content = ""
+        response.poll = discord.Poll(
+            question=question,
+            duration=datetime.timedelta(minutes=15),
+            multiple="true" in (poll_attempt["multiple"] or ""),
+        )
+        for answer in answers:
+            answer = answer.strip()
+            if not answer:
+                _logger.debug(f"Skipping empty answer in poll: {poll_attempt.group(0)!r}.")
+                continue
+            _logger.debug(f"Adding answer to poll: {answer!r}")
+            response.poll.add_answer(text=answer)
+
     # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
     image_attempts: list[re.Match[str]] = [match for match in re.finditer(
-        r"(?:<file type=image>|<image>)(.+?)(?:</file>|</image>)",
+        r'(?:<file type="image">|<image>)(.+?)(?:</file>|</image>)',
         flags=re.IGNORECASE | re.DOTALL,
         string=response.content,
     )]
@@ -159,8 +202,6 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
             filename=f"image_{i}.webp",
             description=f'AI-generated image based on the prompt: "{attempt.group(1)}"',
         ))
-        
-    # TODO: Send polls
 
     # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
     embed_attempts: list[re.Match[str]] = [match for match in re.finditer(
@@ -226,11 +267,11 @@ async def process_url(url: str, *, ctx: CheckupContext) -> str | None:
 
     # Any engines that use normal search queries are handled below
     query = await searching.generate_search_query(
-        "\n".join(msg.content for msg in ctx.history),
+        "\n".join(msg.content for msg in ctx.history) + "\n\nAttempted to search for: " + url,
         model=ctx.config.models.chat,
         ollama_client=ctx.apis.ollama,
     )
-    _logger.debug(f"Generated query for URL {url}: {query}")
+    _logger.debug(f"Generated query for URL {url!r}: {query!r}")
 
     if parsed_url.host.endswith(("youtube.com", "youtu.be")):
         search_results = await searching.search_searx(query, api_url=ctx.config.searx_url, engines=["youtube"])

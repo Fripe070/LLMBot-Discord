@@ -20,7 +20,7 @@ _logger = logging.getLogger(__name__)
 
 
 def get_attachment_tag(kind: str, cap: str) -> str:
-    return f"<file type={kind}>{cap}</file>"
+    return f'<file type="{kind}">{cap}</file>'
 
 
 attachment_cache: dict[str, str] = {}
@@ -118,18 +118,12 @@ async def process_media(message: discord.Message, content: str, *, ctx: CheckupC
 
 async def process_poll(poll: discord.Poll, *, ctx: CheckupContext) -> str:
     poll_attrs: dict[str, str] = {
-        "multiple_choice": "true" if poll.multiple else "false",
+        "question": poll.question or "",
     }
-    if poll.duration < datetime.timedelta(days=1):
-        poll_attrs["duration"] = f"{poll.duration.total_seconds()/60/60:.0f}h"
-    else:
-        poll_attrs["duration"] = f"{poll.duration.total_seconds()/60/60/24:.0f}d"
+    if poll.multiple:
+        poll_attrs["multiple_choice"] = "true"
 
-    result = "<poll"
-    for attr, value in poll_attrs.items():
-        result += f' {attr}="{value}"'
-    result += ">"
-    result += f"{poll.question}"
+    result = f"<poll {" ".join(f'{attr}="{value}"' for attr, value in poll_attrs.items())}>"
     for answer in poll.answers:
         result += f"<answer>{answer.text}</answer>"
     result += "</poll>"
