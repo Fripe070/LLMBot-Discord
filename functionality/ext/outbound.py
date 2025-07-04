@@ -51,13 +51,19 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         return None
 
     # REMEMBER TO UPDATE THE ACTUAL GENERATION IF CHANGING THIS REGEX!
-    if not (
-        len(re.findall(r"<file type=image>|<image>", flags=re.IGNORECASE, string=content))
-        == 
-        len(re.findall(r"</(?:file>|image)>", flags=re.IGNORECASE, string=content))
-    ):
-        _logger.debug("Mismatched amount of image start and end tags.")
-        return None
+    tag_counts = collections.Counter(re.findall(
+        r"""<(file type=image|image|embed(?: +colou?r="+?")?)>""",
+        flags=re.IGNORECASE,
+        string=content,
+    ))
+    for inner in tag_counts.keys():
+        ends: int = len(re.findall(rf"</{inner.split(' ')[0]}>", flags=re.IGNORECASE, string=content))
+        if tag_counts[inner] != ends:
+            _logger.debug(
+                f"Found {tag_counts[inner]} opening tags for {inner!r} but only {ends} closing tags. "
+                f"Skipping processing."
+            )
+            return None
 
     # Replace emotes with their Discord representation
     emoji_map = {f":{emoji.name}:": emoji for emoji in ctx.channel.guild.emojis}
@@ -156,8 +162,9 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         
     # TODO: Send polls
 
+    # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
     embed_attempts: list[re.Match[str]] = [match for match in re.finditer(
-        r'<embed(?:\s+colou?r="(?P<colour>.+?)")?>(?P<content>.+?)</embed>',
+        r'<embed(?: +colou?r="(?P<colour>.+?)")?>(?P<content>.+?)</embed>',
         flags=re.IGNORECASE | re.DOTALL,
         string=response.content,
     )]
