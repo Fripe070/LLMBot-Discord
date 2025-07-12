@@ -13,7 +13,7 @@ from rapidfuzz import fuzz
 from yarl import URL
 
 from .defs import CheckupContext
-from ..apis import searching, image_gen
+from ..apis import searching
 from ..util.formatting import URL_REGEX, URL_LINK_REGEX, URL_REGEX_NO_EMBED
 
 __all__ = (
@@ -175,33 +175,52 @@ async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordRespo
         flags=re.IGNORECASE | re.DOTALL,
         string=response.content,
     )]
-    img_gen_tasks: list[asyncio.Task] = []
-    for i, attempted_image in enumerate(image_attempts):
-        attempted_image_prompt: str = attempted_image.group(1).strip()
-        _logger.debug(f"Attempting to generate image for prompt: {attempted_image_prompt!r}")
-        img_gen_tasks.append(asyncio.create_task(image_gen.generate_image(
-            session=ctx.apis.horde,
-            prompt=attempted_image_prompt,
-            style=ctx.config.horde_image_style,
-        )))
-        if i+1 != len(image_attempts):
-            await asyncio.sleep(10)
+    if image_attempts and (ctx.config.google_cse_id.startswith("<") or ctx.config.google_api_key.startswith("<")):
+        _logger.info("Google CSE ID or API key not set. Skipping image generation.")
+    elif image_attempts:
+        for i, attempted_image in enumerate(image_attempts):
+            response.content = response.content.replace(attempted_image.group(0), "")
             
-    generated_images: list[io.BytesIO | None | BaseException] = await asyncio.gather(*img_gen_tasks, return_exceptions=True)
-    for i, (attempt, generation) in enumerate(zip(image_attempts, generated_images)):
-        if isinstance(generation, BaseException):
-            _logger.error(f"Error generating image: {generation} for prompt: {attempt.group(1)!r}")
-            continue
-        if generation is None:
-            _logger.debug(f"Image generation failed for prompt: {attempt.group(1)!r}")
-            continue
-        _logger.debug(f"Image generated successfully for prompt: {attempt.group(1)!r}")
-        response.content = response.content.replace(attempt.group(0), "")
-        response.attachments.append(discord.File(
-            fp=generation,
-            filename=f"image_{i}.webp",
-            description=f'AI-generated image based on the prompt: "{attempt.group(1)}"',
-        ))
+            attempted_image_prompt: str = attempted_image.group(1).strip()
+            query: str = await searching.generate_search_query(
+                attempted_image_prompt,
+                prompt=searching.IMAGE_SEARCH_PROMPT,
+                model=ctx.config.models.chat,
+                ollama_client=ctx.apis.ollama,
+            )
+            _logger.debug(f"Attempting to find image for prompt: {attempted_image_prompt!r} with query: {query!r}")
+            image_results = await searching.search_google_images(
+                query,
+                api_key=ctx.config.google_api_key,
+                engine_id=ctx.config.google_cse_id,
+            )
+            img_object: io.BytesIO = io.BytesIO()
+            img_filetype: str = "image/webp"
+            for img in image_results:
+                async with ctx.apis.http.get(img.url) as resp:
+                    if not resp.ok:
+                        _logger.debug(f"Image {img.url} could not be fetched: {resp.status}. Skipping.")
+                        continue
+                    img_filetype = resp.headers.get("Content-Type", "image/webp")
+                    if not img_filetype.startswith("image/"):
+                        _logger.debug(f"Image {img.url} is not an image: {img_filetype!r}. Skipping.")
+                        continue
+                    img_object = io.BytesIO(await resp.read())
+                    break
+            if img_object.getbuffer().nbytes == 0:
+                _logger.warning(f"No image data found for prompt: {attempted_image_prompt!r}. Skipping.")
+                continue
+            if img_object.getbuffer().nbytes > ctx.config.max_attachment_size_mb * 1024 * 1024:
+                _logger.debug(
+                    f"Image for prompt {attempted_image_prompt!r} is too large: "
+                    f"{img_object.getbuffer().nbytes / (1024 * 1024):.2f} MB. Skipping."
+                )
+                continue
+            response.attachments.append(discord.File(
+                fp=img_object,
+                filename=f"image_{i}.{img_filetype.split('/')[-1]}",
+                description=f'Search result based on the query: "{query}"',
+            ))
 
     # REMEMBER TO UPDATE THE PREVIOUSLY PERFORMED CHECK IF CHANGING THIS REGEX!
     embed_attempts: list[re.Match[str]] = [match for match in re.finditer(

@@ -89,6 +89,7 @@ class BotConfig(BaseConfigModel):
     prefix: str | list[str] = "ai!"
 
     google_api_key: str = "<google api key goes here>"
+    google_cse_id: str = "<google custom search engine id goes here>"
     ollama_url: str = "http://localhost:11434"
     searx_url: str = "<searx instance URL goes here>"
     horde_key: str = "0"*10

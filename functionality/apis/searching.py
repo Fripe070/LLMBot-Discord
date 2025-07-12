@@ -26,6 +26,15 @@ GIF_PROMPT = (
     "After queries are generated, select the most fitting query and return it in the `most_fitting` field.\n"
 )
 
+IMAGE_SEARCH_PROMPT = (
+    "Based on the above prompt, I want to find and share an image. "
+    "Please suggest search queries that would yield good and relevant results.\n"
+    "Queries should focus on a single thing and should include relevant keywords "
+    "along with enough context to get a good search result, without being so specific that no results show up.\n"
+    "A reasoning field is required to explain your thought process.\n"
+    "After queries are generated, select the most fitting query and return it in the `most_fitting` field.\n"
+)
+
 class ResponseFormat(BaseModel):
     reasoning: str
     queries: list[str]
@@ -143,3 +152,35 @@ async def search_tenor(
                 )
                 for result in json_resp.get("results", [])
             ]
+        
+async def search_google_images(
+    query: str,
+    *,
+    api_url: URL | str = "https://customsearch.googleapis.com/customsearch/v1",
+    api_key: str,
+    engine_id: str,
+) -> list[SearchResult]:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            URL(api_url),
+            params={
+                "q": query,
+                "key": api_key,
+                "cx": engine_id,
+                "searchType": "image",
+                "safe": "active",
+                "prettyPrint": "true",
+            },
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
+            return [
+                SearchResult(
+                    url=URL(item["link"]),
+                    page_title=item.get("title", "No Title"),
+                    engine="Google Images",
+                )
+                for item in data.get("items", [])
+                if item.get("link")
+            ]
+        
