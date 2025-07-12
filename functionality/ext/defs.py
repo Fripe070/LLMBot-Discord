@@ -18,7 +18,7 @@ type MessageID = DiscordSnowflake
 @dataclasses.dataclass(kw_only=True)
 class APISet:
     ollama: ollama_api.AsyncClient
-    session: aiohttp.ClientSession
+    http: aiohttp.ClientSession
     horde: HordeSession
 
 @dataclasses.dataclass(kw_only=True)

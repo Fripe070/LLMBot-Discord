@@ -54,7 +54,7 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
     async def cog_load(self) -> None:
         self.apis = APISet(
             ollama=ollama_api.AsyncClient(host=self.bot.config.ollama_url),
-            session=aiohttp.ClientSession(),
+            http=aiohttp.ClientSession(),
             horde=image_gen.HordeSession(
                 api_key=self.bot.config.horde_key,
                 session=aiohttp.ClientSession(),
@@ -74,8 +74,8 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
     async def cog_unload(self) -> None:
         if self.bg_task is not None and not self.bg_task.done():
             self.bg_task.cancel()
-        if self.apis is not None and not self.apis.session.closed:
-            await self.apis.session.close()
+        if self.apis is not None and not self.apis.http.closed:
+            await self.apis.http.close()
         if self.apis is not None and not self.apis.horde.session.closed:
             await self.apis.horde.session.close()
 

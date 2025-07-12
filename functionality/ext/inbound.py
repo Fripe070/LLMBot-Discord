@@ -208,7 +208,7 @@ async def process_image(image: io.BytesIO | URL, *, ctx: CheckupContext) -> str 
             _logger.debug(f"Untrusted URL {image!r} encountered. Skipping processing.")
             return None
         
-        async with ctx.apis.session.get(image) as response:
+        async with ctx.apis.http.get(image) as response:
             if response.status != 200:
                 _logger.warning(f"Failed to fetch image from {image!r}: {response.status} {response.reason}")
                 return None
