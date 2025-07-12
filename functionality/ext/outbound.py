@@ -33,7 +33,7 @@ class DiscordResponse:
 
 async def process_outgoing(content: str, *, ctx: CheckupContext) -> DiscordResponse | None:
     # Almost guaranteed to be an invalid response
-    if re.search(r"[msgid:[0-9]+]", content):
+    if re.search(r"(\(|\[)msgid:[0-9]+(\)|\])", content.replace(" ", ""), re.IGNORECASE):
         _logger.debug(f"Invalid response content detected: {content!r}. Skipping processing.")
         return None
 

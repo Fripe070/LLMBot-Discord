@@ -234,17 +234,12 @@ class AIBotFunctionality(commands.Cog, name="Bot Functionality"):
             "The following is a  snippet of chat history from a Discord channel.\n"
             "Mention format: `@UserID`. For example: @1 for User #1.\n"
             "Discord-style markdown is supported, including: **bold**, *italic*, ||spoiler||. Note that HTML is NOT supported.\n"
-            "A select few meta-elements can be sent using special XML-like syntax with placeholder values:\n"
-            "Image: `<image>Detailed image description</image>`\n"
-            "Embed: `<embed># title\nContent of the embed</embed>`\n"
-            'Poll: `<poll question="Question"><answer>Possible answer 1</answer><answer>Possible answer 2</answer><answer>Possible answer 3</answer></poll>`\n'
-            "Emote: `:{Emote name}:`\n"
             f"Available emotes: {
                 ', '.join(f'`:{emoji.name}:`' for emoji in channel.guild.emojis) if channel.guild.emojis else 'N/A'
             }\n"
             "</context>\n"
             "\n"
-            "Chat history:\n"
+            "Raw chat history:\n"
         )
 
         prompt_history: Sequence[str] = await self.gather_prompt_history(ctx)
