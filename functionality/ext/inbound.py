@@ -223,10 +223,14 @@ async def process_image(image: io.BytesIO | URL, *, ctx: CheckupContext) -> str 
     else:
         raise ValueError(f"Unsupported image type: {type(image)}. Expected io.BytesIO or URL.")
 
-    caption_text = await caption.generate_image_caption(
-        file,
-        model=ctx.config.models.chat,
-        ollama_client=ctx.apis.ollama,
-    )
+    try:
+        caption_text = await caption.generate_image_caption(
+            file,
+            model=ctx.config.models.chat,
+            ollama_client=ctx.apis.ollama,
+        )
+    except Exception as error:
+        _logger.error(f"Error generating caption for image {image!r}: {error!r}", exc_info=error)
+        return None
     tag = get_attachment_tag("image", caption_text)
     return tag
